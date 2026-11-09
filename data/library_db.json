@@ -1,0 +1,81 @@
+{
+  "users": [
+    {
+      "id": "user_admin_01",
+      "username": "Admin",
+      "fullName": "Administrator Utama",
+      "email": "admin@perpustakaan.go.id",
+      "role": "admin",
+      "createdAt": "2026-01-01T00:00:00.000Z",
+      "passwordHash": "27b87a055b5f65d417347cd2ea0ee499:b2c5dbbb69cc3c5fd6a33edf51432301c2a874268a59e3fa03ceb5a5b8f7eb5b438d1090fdd7dd29a45718553b290a78ef84fe90958c5f57d45f41b86075267e"
+    }
+  ],
+  "categories": [
+    {
+      "id": "cat_1",
+      "name": "Fiksi & Sastra",
+      "description": "Novel, cerpen, puisi, dan karya sastra klasik maupun modern."
+    },
+    {
+      "id": "cat_2",
+      "name": "Sains & Teknologi",
+      "description": "Ilmu pengetahuan alam, teknologi informasi, dan komputasi."
+    },
+    {
+      "id": "cat_3",
+      "name": "Sejarah & Budaya",
+      "description": "Kisah peradaban, biografi tokoh, dan kebudayaan nusantara."
+    },
+    {
+      "id": "cat_4",
+      "name": "Pengembangan Diri",
+      "description": "Motivasi, psikologi populer, dan panduan produktivitas."
+    },
+    {
+      "id": "cat_5",
+      "name": "Bisnis & Ekonomi",
+      "description": "Kewirausahaan, manajemen keuangan, dan investasi."
+    },
+    {
+      "id": "cat_6",
+      "name": "Filsafat & Agama",
+      "description": "Pemikiran mendalam, etika, dan spiritualitas."
+    }
+  ],
+  "books": [],
+  "loans": [],
+  "tokens": {
+    "708687b6236c02419f722e6e4a232cc05a9f6c8231eb5dc6c90635a0b8413932": {
+      "userId": "user_admin_01",
+      "expiresAt": 1794834746779
+    },
+    "cdaf7a2d2626fb533e6d7e3ae9d1797fad739aafe247fbe5d5bc10431163007e": {
+      "userId": "user_admin_01",
+      "expiresAt": 1794834782874
+    },
+    "c20b4c10c2ab119f018a9121d1c6f13fb0b0d1e4009191bcd629787da4d18337": {
+      "userId": "user_1794230034377_2f1ba400",
+      "expiresAt": 1794834834379
+    },
+    "8668b9526189b13d8e320706c18f1b0aaf84e197cf0268eafe809a8b6db5a89b": {
+      "userId": "user_1794230034377_2f1ba400",
+      "expiresAt": 1794834887117
+    },
+    "0d6789ea872c84f2729ae14b180c42c2b44e054d7eea77f125563d2de454c4ab": {
+      "userId": "user_1794230034377_2f1ba400",
+      "expiresAt": 1794834960363
+    },
+    "7e72545ce9601e451e1e965d1837e93d65124603740aacf9dc49e4ca8e412e87": {
+      "userId": "user_1794230034377_2f1ba400",
+      "expiresAt": 1794835026218
+    },
+    "773012f2b3b90bcf0a12b2fe7f1c5c002e9af7b046fa5f33278f6e83fee1f7cb": {
+      "userId": "user_1794230034377_2f1ba400",
+      "expiresAt": 1794835059302
+    },
+    "c089dc9cceb30c98075a27a3c66c98155fa3a8606c1073e42bab607bbe79eaa9": {
+      "userId": "user_admin_01",
+      "expiresAt": 1794836185196
+    }
+  }
+}

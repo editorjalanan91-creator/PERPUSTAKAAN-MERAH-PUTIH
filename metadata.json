@@ -1,0 +1,6 @@
+{
+  "name": "Perpustakaan Online",
+  "description": "Aplikasi Perpustakaan Online modern, profesional, dan responsif dengan autentikasi multi-peran (Admin & Pengunjung), manajemen katalog buku, rak buku, dan laporan peminjaman.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
