@@ -1,43 +1,41 @@
 import React, { useState } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { api } from '../services/api';
+import { supabase } from '../services/supabaseClient';
 import { formatDateIndo } from '../utils/libraryRules';
 import {
   User,
-  Mail,
   Shield,
   Key,
-  Calendar,
-  CheckCircle2,
-  AlertCircle,
   Save,
   LogOut,
   Lock,
 } from 'lucide-react';
 
 export const UserProfileView: React.FC = () => {
-  const { user, updateUser, logout, showToast } = useAuth();
+  const { user, profile, updateProfile, logout, showToast } = useAuth();
 
   // Profile Edit State
-  const [fullName, setFullName] = useState(user?.fullName || '');
-  const [email, setEmail] = useState(user?.email || '');
+  const [fullName, setFullName] = useState(profile?.full_name || user?.fullName || '');
   const [isUpdatingProfile, setIsUpdatingProfile] = useState(false);
 
   // Password Change State
-  const [oldPassword, setOldPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [isChangingPassword, setIsChangingPassword] = useState(false);
 
   const handleUpdateProfile = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!fullName.trim()) {
+      showToast('Nama lengkap tidak boleh kosong.', 'error', 'Validasi Gagal');
+      return;
+    }
+
     setIsUpdatingProfile(true);
     try {
-      const res = await api.updateProfile({ fullName, email });
-      updateUser(res.user);
-      showToast('Profil Anda berhasil diperbarui!', 'success', 'Perubahan Tersimpan');
+      await updateProfile({ full_name: fullName.trim() });
+      showToast('Nama profil Anda berhasil diperbarui di database.', 'success', 'Perubahan Tersimpan');
     } catch (err: any) {
-      showToast(err.message || 'Gagal memperbarui profil.', 'error', 'Pembaruan Gagal');
+      showToast(err?.message || 'Gagal memperbarui profil.', 'error', 'Pembaruan Gagal');
     } finally {
       setIsUpdatingProfile(false);
     }
@@ -45,24 +43,38 @@ export const UserProfileView: React.FC = () => {
 
   const handleChangePassword = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (newPassword.length < 6) {
+      showToast('Password baru minimal 6 karakter.', 'error', 'Validasi Gagal');
+      return;
+    }
     if (newPassword !== confirmPassword) {
-      showToast('Konfirmasi password baru tidak cocok.', 'error', 'Validasi Gagal');
+      showToast('Konfirmasi kata sandi baru tidak cocok.', 'error', 'Validasi Gagal');
       return;
     }
 
     setIsChangingPassword(true);
     try {
-      await api.changePassword({ oldPassword, newPassword, confirmPassword });
-      showToast('Password Anda berhasil diubah! Gunakan password baru untuk login berikutnya.', 'success', 'Password Diperbarui');
-      setOldPassword('');
+      const { error } = await supabase.auth.updateUser({
+        password: newPassword,
+      });
+
+      if (error) {
+        throw error;
+      }
+
+      showToast('Kata sandi Anda berhasil diperbarui di Supabase Auth.', 'success', 'Password Diperbarui');
       setNewPassword('');
       setConfirmPassword('');
     } catch (err: any) {
-      showToast(err.message || 'Gagal mengubah password.', 'error', 'Perubahan Gagal');
+      showToast(err?.message || 'Gagal mengubah kata sandi.', 'error', 'Perubahan Gagal');
     } finally {
       setIsChangingPassword(false);
     }
   };
+
+  const displayName = profile?.full_name || user?.fullName || 'Pengunjung';
+  const username = profile?.username || user?.username || 'user';
+  const email = user?.email || '-';
 
   return (
     <div className="max-w-4xl mx-auto space-y-8 pb-16">
@@ -72,27 +84,29 @@ export const UserProfileView: React.FC = () => {
           Pengaturan Akun &amp; Profil
         </h1>
         <p className="text-xs sm:text-sm text-slate-500 mt-1">
-          Kelola informasi identitas akun anggota perpustakaan dan keamanan kata sandi Anda.
+          Kelola informasi identitas profil keanggotaan dan keamanan akun Supabase Anda.
         </p>
       </div>
 
       {/* Account Info Card */}
       <div className="bg-gradient-to-r from-slate-900 via-blue-950 to-slate-950 text-white p-6 sm:p-8 rounded-3xl border border-slate-800 shadow-xl flex flex-col sm:flex-row items-center sm:items-start gap-6">
         <div className="w-20 h-20 rounded-2xl bg-gradient-to-br from-amber-400 to-amber-600 flex items-center justify-center text-3xl font-extrabold text-slate-950 shadow-lg ring-4 ring-amber-400/20 shrink-0">
-          {user?.fullName?.charAt(0).toUpperCase() || 'U'}
+          {displayName.charAt(0).toUpperCase()}
         </div>
 
         <div className="flex-1 text-center sm:text-left space-y-2">
           <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-blue-900/60 text-amber-300 border border-amber-400/30">
             <Shield className="w-3.5 h-3.5" />
-            <span>Anggota Pengunjung Resmi</span>
+            <span>Anggota Terdaftar ({profile?.role === 'admin' ? 'Administrator' : 'Pengunjung'})</span>
           </div>
 
-          <h2 className="text-2xl font-bold">{user?.fullName}</h2>
+          <h2 className="text-2xl font-bold">{displayName}</h2>
           <p className="text-xs text-slate-400 flex flex-wrap items-center justify-center sm:justify-start gap-4">
-            <span>Username: <strong className="text-slate-200 font-mono">@{user?.username}</strong></span>
+            <span>Username: <strong className="text-slate-200 font-mono">@{username}</strong></span>
             <span>•</span>
-            <span>Terdaftar: <strong className="text-slate-200">{formatDateIndo(user?.createdAt || '')}</strong></span>
+            <span>Email: <strong className="text-slate-200">{email}</strong></span>
+            <span>•</span>
+            <span>Bergabung: <strong className="text-slate-200">{formatDateIndo(profile?.created_at || user?.createdAt || '')}</strong></span>
           </p>
         </div>
 
@@ -113,8 +127,8 @@ export const UserProfileView: React.FC = () => {
               <User className="w-5 h-5" />
             </div>
             <div>
-              <h3 className="font-bold text-base text-slate-900">Informasi Pribadi</h3>
-              <p className="text-xs text-slate-500">Perbarui nama lengkap dan alamat email Anda</p>
+              <h3 className="font-bold text-base text-slate-900">Informasi Profil</h3>
+              <p className="text-xs text-slate-500">Perbarui nama lengkap yang terdaftar di perpustakaan</p>
             </div>
           </div>
 
@@ -133,16 +147,18 @@ export const UserProfileView: React.FC = () => {
             </div>
 
             <div>
-              <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
-                Alamat Email
+              <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1.5">
+                Alamat Email (Akun Supabase)
               </label>
               <input
                 type="email"
-                required
+                disabled
                 value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-slate-900 text-sm focus:outline-none focus:ring-2 focus:ring-blue-900/20 focus:bg-white transition-all"
+                className="w-full px-3.5 py-2.5 rounded-xl bg-slate-100 border border-slate-200 text-slate-500 text-sm cursor-not-allowed"
               />
+              <p className="text-[11px] text-slate-400 mt-1">
+                Email terhubung dengan sistem autentikasi aman Supabase.
+              </p>
             </div>
 
             <div>
@@ -152,12 +168,9 @@ export const UserProfileView: React.FC = () => {
               <input
                 type="text"
                 disabled
-                value={user?.username || ''}
+                value={username}
                 className="w-full px-3.5 py-2.5 rounded-xl bg-slate-100 border border-slate-200 text-slate-500 text-sm cursor-not-allowed"
               />
-              <p className="text-[11px] text-slate-400 mt-1">
-                Username digunakan untuk proses login dan identifikasi keanggotaan.
-              </p>
             </div>
 
             <button
@@ -166,7 +179,7 @@ export const UserProfileView: React.FC = () => {
               className="w-full py-2.5 px-4 rounded-xl bg-blue-900 hover:bg-blue-950 text-white font-bold text-xs shadow-sm transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
             >
               <Save className="w-4 h-4 text-amber-400" />
-              <span>{isUpdatingProfile ? 'Menyimpan Perubahan...' : 'Simpan Perubahan Profil'}</span>
+              <span>{isUpdatingProfile ? 'Menyimpan Perubahan...' : 'Simpan Perubahan'}</span>
             </button>
           </form>
         </div>
@@ -178,29 +191,15 @@ export const UserProfileView: React.FC = () => {
               <Key className="w-5 h-5" />
             </div>
             <div>
-              <h3 className="font-bold text-base text-slate-900">Keamanan &amp; Password</h3>
-              <p className="text-xs text-slate-500">Ganti password secara berkala untuk menjaga akun</p>
+              <h3 className="font-bold text-base text-slate-900">Keamanan &amp; Kata Sandi</h3>
+              <p className="text-xs text-slate-500">Ubah kata sandi akun Supabase Auth Anda</p>
             </div>
           </div>
 
           <form onSubmit={handleChangePassword} className="space-y-4">
             <div>
               <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
-                Password Saat Ini
-              </label>
-              <input
-                type="password"
-                required
-                value={oldPassword}
-                onChange={(e) => setOldPassword(e.target.value)}
-                placeholder="Masukkan password lama"
-                className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-slate-900 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:bg-white transition-all"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
-                Password Baru (Min. 6 Karakter)
+                Kata Sandi Baru (Min. 6 Karakter)
               </label>
               <input
                 type="password"
@@ -208,21 +207,21 @@ export const UserProfileView: React.FC = () => {
                 minLength={6}
                 value={newPassword}
                 onChange={(e) => setNewPassword(e.target.value)}
-                placeholder="Masukkan password baru"
+                placeholder="Masukkan kata sandi baru"
                 className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-slate-900 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:bg-white transition-all"
               />
             </div>
 
             <div>
               <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
-                Konfirmasi Password Baru
+                Konfirmasi Kata Sandi Baru
               </label>
               <input
                 type="password"
                 required
                 value={confirmPassword}
                 onChange={(e) => setConfirmPassword(e.target.value)}
-                placeholder="Ulangi password baru"
+                placeholder="Ulangi kata sandi baru"
                 className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-slate-900 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:bg-white transition-all"
               />
             </div>
@@ -233,7 +232,7 @@ export const UserProfileView: React.FC = () => {
               className="w-full py-2.5 px-4 rounded-xl bg-slate-900 hover:bg-slate-950 text-amber-400 font-bold text-xs shadow-sm transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
             >
               <Lock className="w-4 h-4" />
-              <span>{isChangingPassword ? 'Memperbarui Password...' : 'Perbarui Password'}</span>
+              <span>{isChangingPassword ? 'Memperbarui...' : 'Perbarui Kata Sandi'}</span>
             </button>
           </form>
         </div>

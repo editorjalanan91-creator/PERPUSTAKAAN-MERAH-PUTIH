@@ -2,17 +2,16 @@ import React, { useState, useMemo } from 'react';
 import { Book, Category } from '../types';
 import { BookCard } from '../components/BookCard';
 import { filterAndSortBooks } from '../utils/libraryRules';
+import { getBookCoverUrl } from '../services/supabaseClient';
 import {
   Search,
-  Filter,
-  SlidersHorizontal,
   Grid,
   List,
   RotateCcw,
   BookOpen,
   CheckCircle2,
   AlertCircle,
-  MapPin,
+  FileText,
   Calendar,
 } from 'lucide-react';
 
@@ -239,7 +238,12 @@ export const UserCatalogView: React.FC<UserCatalogViewProps> = ({
           /* List View Mode */
           <div className="space-y-4">
             {filteredBooks.map((book) => {
-              const isAvailable = book.stock > 0;
+              const availableCopies = book.available_copies ?? book.stock ?? 0;
+              const isAvailable = availableCopies > 0;
+              const coverUrl = getBookCoverUrl(book.cover_path || book.coverUrl);
+              const catName = book.category_name || (typeof book.category === 'object' ? book.category?.name : book.category) || 'Umum';
+              const pubYear = book.publication_year || book.year || '-';
+
               return (
                 <div
                   key={book.id}
@@ -247,16 +251,16 @@ export const UserCatalogView: React.FC<UserCatalogViewProps> = ({
                 >
                   <div className="flex items-center gap-4">
                     <img
-                      src={book.coverUrl}
+                      src={coverUrl}
                       alt={book.title}
                       className="w-16 h-22 object-cover rounded-xl shadow-md shrink-0 bg-slate-900"
                     />
                     <div>
                       <div className="flex items-center gap-2 mb-1">
                         <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-blue-50 text-blue-900 border border-blue-200">
-                          {book.category}
+                          {catName}
                         </span>
-                        <span className="text-xs text-slate-400">Tahun {book.year}</span>
+                        <span className="text-xs text-slate-400">Tahun {pubYear}</span>
                       </div>
                       <h3
                         onClick={() => onSelectBook(book)}
@@ -265,14 +269,13 @@ export const UserCatalogView: React.FC<UserCatalogViewProps> = ({
                         {book.title}
                       </h3>
                       <p className="text-xs text-slate-600 mt-0.5">
-                        Penulis: <span className="font-semibold text-slate-800">{book.author}</span> • Penerbit: {book.publisher}
+                        Penulis: <span className="font-semibold text-slate-800">{book.author}</span> {book.publisher ? `• Penerbit: ${book.publisher}` : ''}
                       </p>
                       <div className="flex items-center gap-4 mt-2 text-xs text-slate-500">
-                        <span className="flex items-center gap-1 font-medium text-amber-700">
-                          <MapPin className="w-3.5 h-3.5 text-amber-600" />
-                          {book.shelfLocation}
+                        <span className="flex items-center gap-1 font-medium text-blue-900">
+                          <FileText className="w-3.5 h-3.5 text-blue-900" />
+                          {book.file_type ? book.file_type.toUpperCase() : 'Buku Fisik'}
                         </span>
-                        <span>{book.pages} Hal.</span>
                         <span className="font-mono text-[11px]">ISBN: {book.isbn}</span>
                       </div>
                     </div>
@@ -283,12 +286,12 @@ export const UserCatalogView: React.FC<UserCatalogViewProps> = ({
                       {isAvailable ? (
                         <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800">
                           <CheckCircle2 className="w-3 h-3" />
-                          Tersedia ({book.stock} eks)
+                          Tersedia ({availableCopies} eks)
                         </span>
                       ) : (
                         <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-rose-100 text-rose-800">
                           <AlertCircle className="w-3 h-3" />
-                          Sedang Dipinjam
+                          Stok Habis
                         </span>
                       )}
                     </div>

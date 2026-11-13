@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Loan } from '../types';
 import { formatDateIndo } from '../utils/libraryRules';
+import { getBookCoverUrl, getBookFileSignedUrl } from '../services/supabaseClient';
 import {
   BookMarked,
   Clock,
@@ -12,7 +13,10 @@ import {
   X,
   Compass,
   Calendar,
-  User,
+  BookOpen,
+  HelpCircle,
+  XCircle,
+  ExternalLink,
 } from 'lucide-react';
 
 interface UserLoansViewProps {
@@ -28,17 +32,40 @@ export const UserLoansView: React.FC<UserLoansViewProps> = ({
   onNavigateToCatalog,
   isReturning = false,
 }) => {
-  const [filterStatus, setFilterStatus] = useState<'all' | 'active' | 'returned'>('all');
+  const [filterStatus, setFilterStatus] = useState<'all' | 'pending' | 'approved' | 'returned'>('all');
   const [selectedReceiptLoan, setSelectedReceiptLoan] = useState<Loan | null>(null);
+  const [readingLoanId, setReadingLoanId] = useState<string | null>(null);
 
   const filteredLoans = loans.filter((l) => {
     if (filterStatus === 'all') return true;
-    if (filterStatus === 'active') return l.status === 'active' || l.status === 'overdue';
+    if (filterStatus === 'pending') return l.status === 'pending';
+    if (filterStatus === 'approved') return l.status === 'approved' || l.status === 'borrowed';
     if (filterStatus === 'returned') return l.status === 'returned';
     return true;
   });
 
-  const activeLoansCount = loans.filter((l) => l.status === 'active' || l.status === 'overdue').length;
+  const pendingCount = loans.filter((l) => l.status === 'pending').length;
+  const approvedCount = loans.filter((l) => l.status === 'approved' || l.status === 'borrowed').length;
+
+  const handleOpenDigitalReader = async (loan: Loan) => {
+    if (!loan.book?.file_path) {
+      alert('Buku ini tidak memiliki lampiran berkas digital (merupakan buku fisik).');
+      return;
+    }
+    setReadingLoanId(loan.id);
+    try {
+      const signedUrl = await getBookFileSignedUrl(loan.book.file_path, 7200);
+      if (signedUrl) {
+        window.open(signedUrl, '_blank', 'noopener,noreferrer');
+      } else {
+        alert('Gagal mendapatkan tautan akses file digital. Silakan hubungi admin perpustakaan.');
+      }
+    } catch (err: any) {
+      alert(`Terjadi kesalahan saat memuat berkas: ${err?.message || 'Akses ditolak'}`);
+    } finally {
+      setReadingLoanId(null);
+    }
+  };
 
   return (
     <div className="space-y-8 pb-16">
@@ -49,12 +76,12 @@ export const UserLoansView: React.FC<UserLoansViewProps> = ({
             Daftar Peminjaman Saya
           </h1>
           <p className="text-xs sm:text-sm text-slate-500 mt-1">
-            Pantau status peminjaman buku aktif, batas waktu pengembalian, dan riwayat peminjaman Anda.
+            Pantau status pengajuan peminjaman, akses baca buku digital yang disetujui, dan batas pengembalian.
           </p>
         </div>
 
         {/* Filter Buttons */}
-        <div className="flex items-center gap-1.5 p-1 bg-slate-100 rounded-xl border border-slate-200 self-start sm:self-auto">
+        <div className="flex flex-wrap items-center gap-1.5 p-1 bg-slate-100 rounded-xl border border-slate-200 self-start sm:self-auto">
           <button
             onClick={() => setFilterStatus('all')}
             className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
@@ -64,12 +91,20 @@ export const UserLoansView: React.FC<UserLoansViewProps> = ({
             Semua ({loans.length})
           </button>
           <button
-            onClick={() => setFilterStatus('active')}
+            onClick={() => setFilterStatus('pending')}
             className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
-              filterStatus === 'active' ? 'bg-blue-900 text-white shadow-sm' : 'text-slate-500 hover:text-slate-900'
+              filterStatus === 'pending' ? 'bg-amber-500 text-slate-950 shadow-sm' : 'text-slate-500 hover:text-slate-900'
             }`}
           >
-            Aktif ({activeLoansCount})
+            Menunggu ({pendingCount})
+          </button>
+          <button
+            onClick={() => setFilterStatus('approved')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+              filterStatus === 'approved' ? 'bg-blue-900 text-white shadow-sm' : 'text-slate-500 hover:text-slate-900'
+            }`}
+          >
+            Disetujui ({approvedCount})
           </button>
           <button
             onClick={() => setFilterStatus('returned')}
@@ -86,25 +121,36 @@ export const UserLoansView: React.FC<UserLoansViewProps> = ({
       {filteredLoans.length > 0 ? (
         <div className="space-y-4">
           {filteredLoans.map((loan) => {
-            const isActive = loan.status === 'active';
-            const isOverdue = loan.status === 'overdue';
+            const isPending = loan.status === 'pending';
+            const isApproved = loan.status === 'approved' || loan.status === 'borrowed';
             const isReturned = loan.status === 'returned';
+            const isRejected = loan.status === 'rejected';
+            const isExpired = loan.status === 'expired';
 
-            // Calculate days remaining or days late
-            const today = new Date();
-            today.setHours(0, 0, 0, 0);
-            const dueDate = new Date(loan.dueDate);
-            dueDate.setHours(0, 0, 0, 0);
-            const diffTime = dueDate.getTime() - today.getTime();
-            const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+            const coverUrl = getBookCoverUrl(loan.book?.cover_path);
+            const bookTitle = loan.book?.title || 'Judul Buku';
+            const bookAuthor = loan.book?.author || 'Penulis';
+
+            // Calculate days remaining if due_at is set
+            let diffDays: number | null = null;
+            if (loan.due_at) {
+              const today = new Date();
+              today.setHours(0, 0, 0, 0);
+              const due = new Date(loan.due_at);
+              due.setHours(0, 0, 0, 0);
+              const diffTime = due.getTime() - today.getTime();
+              diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+            }
 
             return (
               <div
                 key={loan.id}
                 className={`bg-white rounded-2xl p-5 border shadow-sm transition-all flex flex-col md:flex-row items-start md:items-center justify-between gap-5 ${
-                  isOverdue
-                    ? 'border-rose-300 ring-1 ring-rose-200'
-                    : isActive
+                  isRejected || isExpired
+                    ? 'border-rose-200 bg-rose-50/20'
+                    : isPending
+                    ? 'border-amber-300 bg-amber-50/30 ring-1 ring-amber-200'
+                    : isApproved
                     ? 'border-blue-200'
                     : 'border-slate-200 opacity-90'
                 }`}
@@ -112,23 +158,23 @@ export const UserLoansView: React.FC<UserLoansViewProps> = ({
                 {/* Book & Info */}
                 <div className="flex items-start gap-4">
                   <img
-                    src={loan.bookCover || 'https://images.unsplash.com/photo-1544947950-fa07a98d237f?auto=format&fit=crop&w=300&q=80'}
-                    alt={loan.bookTitle}
+                    src={coverUrl}
+                    alt={bookTitle}
                     className="w-16 h-22 object-cover rounded-xl shadow shrink-0 bg-slate-900"
                   />
 
                   <div>
-                    <div className="flex items-center gap-2 mb-1">
-                      {isActive && (
-                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-blue-100 text-blue-900">
-                          <Clock className="w-3 h-3" />
-                          Sedang Dipinjam
+                    <div className="flex items-center gap-2 mb-1 flex-wrap">
+                      {isPending && (
+                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-amber-100 text-amber-800">
+                          <HelpCircle className="w-3 h-3 text-amber-600" />
+                          Menunggu Persetujuan Admin
                         </span>
                       )}
-                      {isOverdue && (
-                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-rose-100 text-rose-800 animate-pulse">
-                          <AlertTriangle className="w-3 h-3" />
-                          Terlambat ({Math.abs(diffDays)} Hari)
+                      {isApproved && (
+                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-blue-100 text-blue-900">
+                          <CheckCircle2 className="w-3 h-3 text-blue-900" />
+                          Disetujui (Dapat Dibaca)
                         </span>
                       )}
                       {isReturned && (
@@ -137,66 +183,100 @@ export const UserLoansView: React.FC<UserLoansViewProps> = ({
                           Sudah Dikembalikan
                         </span>
                       )}
-                      <span className="text-[11px] font-mono text-slate-400">ID: {loan.id.slice(-6)}</span>
+                      {isRejected && (
+                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-rose-100 text-rose-800">
+                          <XCircle className="w-3 h-3" />
+                          Permintaan Ditolak
+                        </span>
+                      )}
+                      {isExpired && (
+                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-rose-100 text-rose-800">
+                          <AlertTriangle className="w-3 h-3" />
+                          Masa Pinjam Berakhir
+                        </span>
+                      )}
+                      <span className="text-[11px] font-mono text-slate-400">ID: {loan.id.slice(-6).toUpperCase()}</span>
                     </div>
 
-                    <h3 className="font-bold text-slate-900 text-base">{loan.bookTitle}</h3>
-                    <p className="text-xs text-slate-600 mt-0.5">Penulis: {loan.bookAuthor}</p>
+                    <h3 className="font-bold text-slate-900 text-base">{bookTitle}</h3>
+                    <p className="text-xs text-slate-600 mt-0.5">Penulis: {bookAuthor}</p>
 
                     {/* Dates */}
                     <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-xs text-slate-500 mt-2.5">
                       <span className="flex items-center gap-1">
                         <Calendar className="w-3.5 h-3.5 text-slate-400" />
-                        Tgl Pinjam: <strong className="text-slate-700">{formatDateIndo(loan.borrowDate)}</strong>
+                        Tgl Pengajuan: <strong className="text-slate-700">{formatDateIndo(loan.requested_at || loan.created_at)}</strong>
                       </span>
-                      <span className="flex items-center gap-1">
-                        <Clock className="w-3.5 h-3.5 text-slate-400" />
-                        Jatuh Tempo: <strong className="text-slate-700">{formatDateIndo(loan.dueDate)}</strong>
-                      </span>
-                      {loan.returnDate && (
+                      {loan.due_at && (
+                        <span className="flex items-center gap-1">
+                          <Clock className="w-3.5 h-3.5 text-slate-400" />
+                          Batas Kembali: <strong className="text-slate-700">{formatDateIndo(loan.due_at)}</strong>
+                        </span>
+                      )}
+                      {loan.returned_at && (
                         <span className="flex items-center gap-1 text-emerald-700 font-medium">
                           <CheckCircle2 className="w-3.5 h-3.5" />
-                          Dikembalikan: {formatDateIndo(loan.returnDate)}
+                          Dikembalikan: {formatDateIndo(loan.returned_at)}
                         </span>
                       )}
                     </div>
+
+                    {/* Admin Note if available */}
+                    {loan.admin_note && (
+                      <p className="text-xs text-slate-600 bg-slate-50 border border-slate-200 rounded-lg p-2 mt-2">
+                        <strong className="text-slate-800">Catatan Admin:</strong> {loan.admin_note}
+                      </p>
+                    )}
                   </div>
                 </div>
 
-                {/* Actions & Days Countdown */}
+                {/* Actions */}
                 <div className="flex sm:flex-row md:flex-col items-center md:items-end justify-between w-full md:w-auto gap-3 pt-4 md:pt-0 border-t md:border-t-0 border-slate-100">
                   <div className="text-left md:text-right">
-                    {isActive && (
+                    {isApproved && diffDays !== null && (
                       <p className="text-xs font-semibold text-blue-900">
-                        {diffDays >= 0 ? `Sisa ${diffDays} hari lagi` : 'Batas waktu telah lewat'}
+                        {diffDays >= 0 ? `Sisa ${diffDays} hari lagi` : 'Batas pengembalian terlewat'}
                       </p>
                     )}
-                    {isOverdue && (
-                      <p className="text-xs font-bold text-rose-700">
-                        Harap segera kembalikan ke perpustakaan!
+                    {isPending && (
+                      <p className="text-xs text-amber-700 font-medium">
+                        Menunggu verifikasi admin perpustakaan
                       </p>
                     )}
                   </div>
 
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap justify-end">
+                    {/* Read Digital Book Button if approved */}
+                    {isApproved && loan.book?.file_path && (
+                      <button
+                        type="button"
+                        disabled={readingLoanId === loan.id}
+                        onClick={() => handleOpenDigitalReader(loan)}
+                        className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-blue-900 hover:bg-blue-950 text-white shadow-sm transition-all cursor-pointer"
+                      >
+                        <BookOpen className="w-3.5 h-3.5 text-amber-400" />
+                        <span>{readingLoanId === loan.id ? 'Membuka...' : 'Baca Digital'}</span>
+                      </button>
+                    )}
+
                     <button
                       type="button"
                       onClick={() => setSelectedReceiptLoan(loan)}
                       className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-800 transition-colors cursor-pointer"
                     >
                       <FileText className="w-3.5 h-3.5" />
-                      <span>Bukti Pinjam</span>
+                      <span>Resi</span>
                     </button>
 
-                    {(isActive || isOverdue) && (
+                    {isApproved && (
                       <button
                         type="button"
                         disabled={isReturning}
                         onClick={() => onReturnBook(loan.id)}
-                        className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-700 active:scale-[0.99] text-white shadow-sm transition-all cursor-pointer disabled:opacity-50"
+                        className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm transition-all cursor-pointer disabled:opacity-50"
                       >
                         <RotateCcw className="w-3.5 h-3.5" />
-                        <span>Kembalikan Buku</span>
+                        <span>Kembalikan</span>
                       </button>
                     )}
                   </div>
@@ -215,7 +295,7 @@ export const UserLoansView: React.FC<UserLoansViewProps> = ({
             Belum Ada Peminjaman Buku
           </h3>
           <p className="text-xs text-slate-500 mb-6 leading-relaxed">
-            Anda belum memiliki buku yang sedang dipinjam. Jelajahi katalog perpustakaan dan temukan buku yang Anda minati.
+            Anda belum memiliki pengajuan atau peminjaman buku. Jelajahi katalog perpustakaan dan ajukan peminjaman buku yang Anda minati.
           </p>
           <button
             onClick={onNavigateToCatalog}
@@ -235,7 +315,7 @@ export const UserLoansView: React.FC<UserLoansViewProps> = ({
             <div className="p-5 bg-slate-900 text-white flex items-center justify-between border-b border-slate-800">
               <div className="flex items-center gap-2">
                 <FileText className="w-5 h-5 text-amber-400" />
-                <span className="font-bold text-sm">Bukti Peminjaman Resmi</span>
+                <span className="font-bold text-sm">Resi Peminjaman Resmi</span>
               </div>
               <button
                 onClick={() => setSelectedReceiptLoan(null)}
@@ -248,50 +328,58 @@ export const UserLoansView: React.FC<UserLoansViewProps> = ({
             {/* Slip Content */}
             <div className="p-6 space-y-5 text-slate-800 text-xs">
               <div className="text-center border-b border-slate-200 pb-4">
-                <h4 className="font-brand font-bold text-base text-slate-950">PERPUSTAKAAN MERAH PUTIH</h4>
-                <p className="text-[11px] text-slate-500">Sistem Informasi Perpustakaan Digital</p>
+                <h4 className="font-bold text-base text-slate-950 uppercase tracking-wide">PERPUSTAKAAN MERAH PUTIH</h4>
+                <p className="text-[11px] text-slate-500">Sistem Informasi Perpustakaan Digital &amp; Terintegrasi</p>
                 <div className="mt-2 inline-block px-2.5 py-0.5 rounded bg-slate-100 font-mono text-[10px] text-slate-600">
-                  NO RESI: {selectedReceiptLoan.id.toUpperCase()}
+                  NO RESI: {selectedReceiptLoan.id.slice(-8).toUpperCase()}
                 </div>
               </div>
 
               <div className="space-y-2.5">
                 <div className="flex justify-between">
                   <span className="text-slate-500">Peminjam:</span>
-                  <span className="font-bold text-slate-900">{selectedReceiptLoan.userName}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-500">Email:</span>
-                  <span className="font-medium text-slate-700">{selectedReceiptLoan.userEmail}</span>
+                  <span className="font-bold text-slate-900">
+                    {selectedReceiptLoan.profile?.full_name || selectedReceiptLoan.userName || 'Pengunjung'}
+                  </span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-slate-500">Judul Buku:</span>
                   <span className="font-bold text-slate-900 text-right max-w-[200px] truncate">
-                    {selectedReceiptLoan.bookTitle}
+                    {selectedReceiptLoan.book?.title || selectedReceiptLoan.bookTitle}
                   </span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-slate-500">Penulis:</span>
-                  <span className="font-medium text-slate-700">{selectedReceiptLoan.bookAuthor}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-500">Tanggal Pinjam:</span>
-                  <span className="font-semibold text-slate-800">{formatDateIndo(selectedReceiptLoan.borrowDate)}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-500">Batas Pengembalian:</span>
-                  <span className="font-bold text-blue-900">{formatDateIndo(selectedReceiptLoan.dueDate)}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-500">Status Saat Ini:</span>
-                  <span className="font-bold text-slate-900 uppercase">
-                    {selectedReceiptLoan.status === 'returned'
-                      ? 'SUDAH DIKEMBALIKAN'
-                      : selectedReceiptLoan.status === 'overdue'
-                      ? 'TERLAMBAT'
-                      : 'AKTIF DIPINJAM'}
+                  <span className="font-medium text-slate-700">
+                    {selectedReceiptLoan.book?.author || selectedReceiptLoan.bookAuthor}
                   </span>
                 </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Tanggal Pengajuan:</span>
+                  <span className="font-semibold text-slate-800">
+                    {formatDateIndo(selectedReceiptLoan.requested_at || selectedReceiptLoan.created_at)}
+                  </span>
+                </div>
+                {selectedReceiptLoan.due_at && (
+                  <div className="flex justify-between">
+                    <span className="text-slate-500">Batas Pengembalian:</span>
+                    <span className="font-bold text-blue-900">{formatDateIndo(selectedReceiptLoan.due_at)}</span>
+                  </div>
+                )}
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Status Transaksi:</span>
+                  <span className="font-bold text-slate-900 uppercase">
+                    {selectedReceiptLoan.status}
+                  </span>
+                </div>
+                {selectedReceiptLoan.admin_note && (
+                  <div className="flex justify-between">
+                    <span className="text-slate-500">Catatan Admin:</span>
+                    <span className="font-medium text-slate-700 text-right max-w-[180px]">
+                      {selectedReceiptLoan.admin_note}
+                    </span>
+                  </div>
+                )}
               </div>
 
               <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 text-[11px] text-slate-500 leading-relaxed">

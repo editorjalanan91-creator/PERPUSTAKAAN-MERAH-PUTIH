@@ -12,15 +12,17 @@ import {
   Compass,
   Shield,
   Plus,
+  Bookmark,
 } from 'lucide-react';
 
-export type AdminTab = 'dashboard' | 'books' | 'categories' | 'users' | 'reports';
+export type AdminTab = 'dashboard' | 'books' | 'categories' | 'loans' | 'users' | 'reports';
 
 interface AdminLayoutProps {
   currentTab: AdminTab;
   onSelectTab: (tab: AdminTab) => void;
   onPreviewVisitorCatalog?: () => void;
   onOpenAddBookModal: () => void;
+  pendingLoansCount?: number;
   children: React.ReactNode;
 }
 
@@ -29,6 +31,7 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
   onSelectTab,
   onPreviewVisitorCatalog,
   onOpenAddBookModal,
+  pendingLoansCount = 0,
   children,
 }) => {
   const { user, logout } = useAuth();
@@ -38,6 +41,7 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
     { id: 'dashboard' as const, label: 'Dashboard', icon: LayoutDashboard },
     { id: 'books' as const, label: 'Manajemen Buku', icon: BookOpen },
     { id: 'categories' as const, label: 'Kategori Buku', icon: Layers },
+    { id: 'loans' as const, label: 'Peminjaman Buku', icon: Bookmark, badge: pendingLoansCount },
     { id: 'users' as const, label: 'Daftar Pengunjung', icon: Users },
     { id: 'reports' as const, label: 'Laporan Peminjaman', icon: FileBarChart },
   ];
@@ -88,8 +92,15 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
                     : 'text-slate-400 hover:text-white hover:bg-slate-900'
                 }`}
               >
-                <Icon className={`w-4 h-4 ${isActive ? 'text-amber-400' : 'text-slate-500'}`} />
-                <span>{item.label}</span>
+                <div className="flex items-center gap-3 min-w-0">
+                  <Icon className={`w-4 h-4 shrink-0 ${isActive ? 'text-amber-400' : 'text-slate-500'}`} />
+                  <span className="truncate">{item.label}</span>
+                </div>
+                {item.badge !== undefined && item.badge > 0 && (
+                  <span className="ml-auto px-1.5 py-0.5 text-[10px] font-bold rounded-full bg-amber-500 text-slate-950">
+                    {item.badge}
+                  </span>
+                )}
               </button>
             );
           })}
@@ -164,8 +175,15 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
                     : 'text-slate-400 hover:bg-slate-900'
                 }`}
               >
-                <Icon className="w-4 h-4 text-amber-400" />
-                <span>{item.label}</span>
+                <div className="flex items-center gap-3">
+                  <Icon className="w-4 h-4 text-amber-400" />
+                  <span>{item.label}</span>
+                </div>
+                {item.badge !== undefined && item.badge > 0 && (
+                  <span className="px-2 py-0.5 text-xs font-bold rounded-full bg-amber-500 text-slate-950">
+                    {item.badge}
+                  </span>
+                )}
               </button>
             );
           })}

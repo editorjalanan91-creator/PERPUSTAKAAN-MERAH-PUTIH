@@ -1,4 +1,4 @@
-import { Book, Loan, MonthlyReportSummary } from '../types';
+import { Book, Loan, LoanStatus, MonthlyReportSummary } from '../types';
 
 /**
  * Validate registration input fields.
@@ -40,26 +40,39 @@ export function validateRegistration(data: {
 }
 
 /**
- * Compute current loan status: 'active' | 'returned' | 'overdue'
+ * Compute current loan status:
+ * Menangani status database Supabase: pending, approved, rejected, borrowed, returned, expired
  */
 export function evaluateLoanStatus(
-  dueDateStr: string,
-  returnDateStr?: string,
+  dueAtStr?: string | null,
+  returnedAtStr?: string | null,
+  currentStatus: LoanStatus = 'pending',
   referenceDateStr?: string
-): 'active' | 'returned' | 'overdue' {
-  if (returnDateStr) {
+): LoanStatus {
+  if (returnedAtStr || currentStatus === 'returned') {
     return 'returned';
   }
-  const today = referenceDateStr ? new Date(referenceDateStr) : new Date();
-  today.setHours(0, 0, 0, 0);
-
-  const due = new Date(dueDateStr);
-  due.setHours(0, 0, 0, 0);
-
-  if (today.getTime() > due.getTime()) {
-    return 'overdue';
+  if (currentStatus === 'rejected') {
+    return 'rejected';
   }
-  return 'active';
+  if (currentStatus === 'pending') {
+    return 'pending';
+  }
+
+  // Jika approved atau borrowed, periksa apakah sudah expired
+  if (dueAtStr) {
+    const today = referenceDateStr ? new Date(referenceDateStr) : new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const due = new Date(dueAtStr);
+    due.setHours(0, 0, 0, 0);
+
+    if (today.getTime() > due.getTime()) {
+      return 'expired';
+    }
+  }
+
+  return currentStatus;
 }
 
 /**
@@ -69,7 +82,7 @@ export function filterAndSortBooks(
   books: Book[],
   options: {
     query?: string;
-    category?: string;
+    category?: string; // category name or category_id
     availability?: 'all' | 'available' | 'unavailable';
     sortBy?: 'newest' | 'oldest' | 'title-asc' | 'title-desc' | 'year-desc' | 'year-asc';
   }
@@ -78,16 +91,19 @@ export function filterAndSortBooks(
 
   // Category filter
   if (options.category && options.category !== 'Semua') {
-    result = result.filter(
-      (b) => b.category.toLowerCase() === options.category?.toLowerCase()
-    );
+    const catSearch = options.category.toLowerCase().trim();
+    result = result.filter((b) => {
+      const catName = (b.category_name || b.category?.name || '').toLowerCase();
+      const catId = b.category_id || '';
+      return catName === catSearch || catId === options.category;
+    });
   }
 
-  // Availability filter
+  // Availability filter (based on available_copies)
   if (options.availability === 'available') {
-    result = result.filter((b) => b.stock > 0);
+    result = result.filter((b) => (b.available_copies ?? 0) > 0);
   } else if (options.availability === 'unavailable') {
-    result = result.filter((b) => b.stock <= 0);
+    result = result.filter((b) => (b.available_copies ?? 0) <= 0);
   }
 
   // Search query (title, author, publisher, isbn, description)
@@ -99,17 +115,18 @@ export function filterAndSortBooks(
         b.author.toLowerCase().includes(q) ||
         b.publisher.toLowerCase().includes(q) ||
         b.isbn.toLowerCase().includes(q) ||
-        b.category.toLowerCase().includes(q)
+        (b.description || '').toLowerCase().includes(q) ||
+        (b.category_name || b.category?.name || '').toLowerCase().includes(q)
     );
   }
 
   // Sorting
   switch (options.sortBy) {
     case 'newest':
-      result.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      result.sort((a, b) => new Date(b.created_at || '').getTime() - new Date(a.created_at || '').getTime());
       break;
     case 'oldest':
-      result.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+      result.sort((a, b) => new Date(a.created_at || '').getTime() - new Date(b.created_at || '').getTime());
       break;
     case 'title-asc':
       result.sort((a, b) => a.title.localeCompare(b.title, 'id'));
@@ -118,10 +135,10 @@ export function filterAndSortBooks(
       result.sort((a, b) => b.title.localeCompare(a.title, 'id'));
       break;
     case 'year-desc':
-      result.sort((a, b) => b.year - a.year);
+      result.sort((a, b) => (b.publication_year || 0) - (a.publication_year || 0));
       break;
     case 'year-asc':
-      result.sort((a, b) => a.year - b.year);
+      result.sort((a, b) => (a.publication_year || 0) - (b.publication_year || 0));
       break;
     default:
       break;
@@ -137,7 +154,6 @@ export function aggregateMonthlyReport(
   loans: Loan[],
   period: string // YYYY-MM
 ): MonthlyReportSummary {
-  // Period label in Indonesian
   const [yearStr, monthStr] = period.split('-');
   const monthNum = parseInt(monthStr, 10);
   const monthsIndo = [
@@ -146,37 +162,24 @@ export function aggregateMonthlyReport(
   ];
   const periodLabel = `${monthsIndo[monthNum - 1] || 'Bulan'} ${yearStr}`;
 
-  // Filter loans that fall into this month (either borrowDate or dueDate in this month)
-  const monthLoans = loans.filter((loan) => loan.borrowDate.startsWith(period));
+  const monthLoans = loans.filter((loan) => (loan.requested_at || loan.created_at || '').startsWith(period));
 
   const totalLoans = monthLoans.length;
   const returnedLoans = monthLoans.filter((l) => l.status === 'returned').length;
-  const overdueLoans = monthLoans.filter((l) => l.status === 'overdue').length;
-  const activeLoans = monthLoans.filter((l) => l.status === 'active').length;
+  const pendingLoans = monthLoans.filter((l) => l.status === 'pending').length;
+  const activeLoans = monthLoans.filter((l) => l.status === 'approved' || l.status === 'borrowed').length;
 
-  const onTimeReturns = monthLoans.filter((l) => {
-    if (l.status === 'returned' && l.returnDate && l.dueDate) {
-      return new Date(l.returnDate) <= new Date(l.dueDate);
-    }
-    return false;
-  }).length;
-
-  const onTimeReturnRate = returnedLoans > 0
-    ? Math.round((onTimeReturns / returnedLoans) * 100)
-    : 100;
-
-  // Book frequency
   const bookCountMap: Record<string, { title: string; author: string; coverUrl: string; count: number }> = {};
   for (const l of monthLoans) {
-    if (!bookCountMap[l.bookId]) {
-      bookCountMap[l.bookId] = {
-        title: l.bookTitle,
-        author: l.bookAuthor,
-        coverUrl: l.bookCover,
+    if (!bookCountMap[l.book_id]) {
+      bookCountMap[l.book_id] = {
+        title: l.book?.title || 'Buku',
+        author: l.book?.author || 'Penulis',
+        coverUrl: l.book?.cover_path || '',
         count: 0,
       };
     }
-    bookCountMap[l.bookId].count++;
+    bookCountMap[l.book_id].count++;
   }
 
   const topBooks = Object.entries(bookCountMap)
@@ -190,34 +193,22 @@ export function aggregateMonthlyReport(
     .sort((a, b) => b.borrowCount - a.borrowCount)
     .slice(0, 5);
 
-  // Daily distribution
-  const dayMap: Record<string, number> = {};
-  for (const l of monthLoans) {
-    const day = l.borrowDate;
-    dayMap[day] = (dayMap[day] || 0) + 1;
-  }
-  const dailyTrend = Object.entries(dayMap)
-    .map(([day, count]) => ({ day, count }))
-    .sort((a, b) => a.day.localeCompare(b.day));
-
   return {
     period,
     periodLabel,
     totalLoans,
     activeLoans,
     returnedLoans,
-    overdueLoans,
-    onTimeReturnRate,
+    pendingLoans,
     topBooks,
     categoryDistribution: [],
-    dailyTrend,
   };
 }
 
 /**
- * Format date in Indonesian locale (e.g. "9 November 2026")
+ * Format date in Indonesian locale (e.g. "12 November 2026")
  */
-export function formatDateIndo(dateStr: string): string {
+export function formatDateIndo(dateStr?: string | null): string {
   if (!dateStr) return '-';
   try {
     const date = new Date(dateStr);

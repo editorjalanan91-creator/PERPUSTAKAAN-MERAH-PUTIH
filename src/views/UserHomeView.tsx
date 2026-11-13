@@ -6,9 +6,7 @@ import {
   Sparkles,
   Search,
   Layers,
-  CheckCircle2,
   ArrowRight,
-  Bookmark,
   ShieldCheck,
   Clock,
   Compass,
@@ -38,17 +36,17 @@ export const UserHomeView: React.FC<UserHomeViewProps> = ({
 
   // Derive stats
   const totalBooks = books.length;
-  const availableCopies = books.reduce((acc, b) => acc + b.stock, 0);
+  const availableCopies = books.reduce((acc, b) => acc + (b.available_copies ?? b.stock ?? 0), 0);
   const totalCategories = categories.length;
 
-  // Newest books (sort by createdAt or id desc)
+  // Newest books (sort by created_at desc)
   const newestBooks = [...books]
-    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+    .sort((a, b) => new Date(b.created_at || b.createdAt || '').getTime() - new Date(a.created_at || a.createdAt || '').getTime())
     .slice(0, 4);
 
-  // Recommendations (e.g. books with high stock or curated list)
+  // Recommended books (active books with available copies)
   const recommendedBooks = [...books]
-    .sort((a, b) => b.pages - a.pages)
+    .filter((b) => (b.available_copies ?? 0) > 0)
     .slice(0, 4);
 
   return (
@@ -61,7 +59,7 @@ export const UserHomeView: React.FC<UserHomeViewProps> = ({
         <div className="relative max-w-3xl space-y-6">
           <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-blue-900/50 border border-amber-400/30 text-amber-300 text-xs font-semibold backdrop-blur-sm">
             <Sparkles className="w-3.5 h-3.5" />
-            <span>Katalog Perpustakaan Digital 2026</span>
+            <span>Katalog Perpustakaan Merah Putih</span>
           </div>
 
           <h1 className="text-3xl sm:text-5xl font-extrabold tracking-tight leading-tight font-serif-title">
@@ -69,7 +67,7 @@ export const UserHomeView: React.FC<UserHomeViewProps> = ({
           </h1>
 
           <p className="text-sm sm:text-base text-slate-300 leading-relaxed max-w-2xl">
-            Akses ribuan judul buku fisik dan digital dengan kemudahan peminjaman real-time. Cari literatur berdasarkan judul, penulis, maupun kategori favorit Anda.
+            Akses ribuan judul buku fisik dan digital dengan kemudahan peminjaman terintegrasi. Cari literatur berdasarkan judul, penulis, maupun kategori favorit Anda.
           </p>
 
           {/* Quick Search Bar */}
@@ -133,23 +131,26 @@ export const UserHomeView: React.FC<UserHomeViewProps> = ({
         </div>
 
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-3">
-          {categories.map((cat) => (
-            <button
-              key={cat.id}
-              onClick={() => onNavigateToCatalog(cat.name)}
-              className="p-4 rounded-2xl bg-white border border-slate-200/90 hover:border-amber-400 hover:shadow-md transition-all text-left group cursor-pointer"
-            >
-              <div className="w-8 h-8 rounded-xl bg-blue-50 group-hover:bg-amber-400/20 text-blue-900 group-hover:text-amber-700 flex items-center justify-center transition-colors mb-2.5">
-                <BookOpen className="w-4 h-4" />
-              </div>
-              <h3 className="text-xs font-bold text-slate-800 group-hover:text-blue-950 truncate">
-                {cat.name}
-              </h3>
-              <p className="text-[10px] text-slate-400 mt-0.5">
-                {cat.bookCount || 0} koleksi buku
-              </p>
-            </button>
-          ))}
+          {categories.map((cat) => {
+            const count = books.filter((b) => b.category_id === cat.id).length;
+            return (
+              <button
+                key={cat.id}
+                onClick={() => onNavigateToCatalog(cat.name)}
+                className="p-4 rounded-2xl bg-white border border-slate-200/90 hover:border-amber-400 hover:shadow-md transition-all text-left group cursor-pointer"
+              >
+                <div className="w-8 h-8 rounded-xl bg-blue-50 group-hover:bg-amber-400/20 text-blue-900 group-hover:text-amber-700 flex items-center justify-center transition-colors mb-2.5">
+                  <BookOpen className="w-4 h-4" />
+                </div>
+                <h3 className="text-xs font-bold text-slate-800 group-hover:text-blue-950 truncate">
+                  {cat.name}
+                </h3>
+                <p className="text-[10px] text-slate-400 mt-0.5">
+                  {count} koleksi buku
+                </p>
+              </button>
+            );
+          })}
         </div>
       </section>
 
@@ -186,7 +187,7 @@ export const UserHomeView: React.FC<UserHomeViewProps> = ({
         ) : (
           <div className="p-8 rounded-2xl bg-white border border-slate-200 text-center text-slate-500 text-xs">
             <BookOpen className="w-8 h-8 text-slate-300 mx-auto mb-2" />
-            <p className="font-semibold text-slate-700">Belum ada buku terbaru</p>
+            <p className="font-semibold text-slate-700">Belum ada buku di perpustakaan</p>
             <p className="text-[11px] text-slate-400 mt-0.5">Administrator sedang mempersiapkan koleksi buku baru.</p>
           </div>
         )}
@@ -198,9 +199,9 @@ export const UserHomeView: React.FC<UserHomeViewProps> = ({
           <div>
             <h2 className="text-xl font-bold text-slate-900 flex items-center gap-2">
               <Sparkles className="w-5 h-5 text-amber-500" />
-              <span>Rekomendasi Pilihan Kurator</span>
+              <span>Koleksi Siap Dipinjam</span>
             </h2>
-            <p className="text-xs text-slate-500">Buku berbobot yang paling diminati pembaca</p>
+            <p className="text-xs text-slate-500">Buku dengan stok tersedia yang siap diajukan peminjaman</p>
           </div>
         </div>
 
@@ -218,8 +219,8 @@ export const UserHomeView: React.FC<UserHomeViewProps> = ({
         ) : (
           <div className="p-8 rounded-2xl bg-white border border-slate-200 text-center text-slate-500 text-xs">
             <Sparkles className="w-8 h-8 text-slate-300 mx-auto mb-2" />
-            <p className="font-semibold text-slate-700">Belum ada rekomendasi buku</p>
-            <p className="text-[11px] text-slate-400 mt-0.5">Rekomendasi kurator akan muncul setelah buku ditambahkan.</p>
+            <p className="font-semibold text-slate-700">Tidak ada buku siap pinjam saat ini</p>
+            <p className="text-[11px] text-slate-400 mt-0.5">Buku akan muncul setelah stok tersedia di perpustakaan.</p>
           </div>
         )}
       </section>
@@ -231,9 +232,9 @@ export const UserHomeView: React.FC<UserHomeViewProps> = ({
             <ShieldCheck className="w-6 h-6" />
           </div>
           <div>
-            <h4 className="font-bold text-sm text-slate-100">Peminjaman Aman &amp; Tercatat</h4>
+            <h4 className="font-bold text-sm text-slate-100">Peminjaman Aman &amp; Terverifikasi</h4>
             <p className="text-xs text-slate-400 mt-1 leading-relaxed">
-              Setiap peminjaman buku tercatat rapi di sistem perpustakaan dengan bukti peminjaman digital resmi.
+              Pengunjung terverifikasi dapat mengajukan peminjaman buku fisik maupun digital secara langsung.
             </p>
           </div>
         </div>
@@ -243,9 +244,9 @@ export const UserHomeView: React.FC<UserHomeViewProps> = ({
             <Clock className="w-6 h-6" />
           </div>
           <div>
-            <h4 className="font-bold text-sm text-slate-100">Batas Waktu Fleksibel</h4>
+            <h4 className="font-bold text-sm text-slate-100">Persetujuan Admin Cepat</h4>
             <p className="text-xs text-slate-400 mt-1 leading-relaxed">
-              Durasi peminjaman dapat dipilih antara 3 hingga 14 hari dengan notifikasi pengembalian sebelum jatuh tempo.
+              Admin memverifikasi dan menyetujui peminjaman secara transparan dengan batas pengembalian terukur.
             </p>
           </div>
         </div>
@@ -255,9 +256,9 @@ export const UserHomeView: React.FC<UserHomeViewProps> = ({
             <Compass className="w-6 h-6" />
           </div>
           <div>
-            <h4 className="font-bold text-sm text-slate-100">Lokasi Rak Akurat</h4>
+            <h4 className="font-bold text-sm text-slate-100">Akses Baca Digital</h4>
             <p className="text-xs text-slate-400 mt-1 leading-relaxed">
-              Memudahkan Anda menemukan posisi fisik buku secara langsung di ruang perpustakaan berdasarkan kode rak.
+              Buku berformat PDF dan EPUB dapat dibaca langsung oleh peminjam yang telah disetujui.
             </p>
           </div>
         </div>

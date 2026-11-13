@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Book } from '../types';
-import { BookOpen, MapPin, Calendar, Tag, CheckCircle2, AlertTriangle, Layers } from 'lucide-react';
+import { BookOpen, Calendar, Tag, CheckCircle2, AlertTriangle, FileText } from 'lucide-react';
+import { getBookCoverUrl } from '../services/supabaseClient';
 
 interface BookCardProps {
   book: Book;
@@ -9,16 +10,21 @@ interface BookCardProps {
 }
 
 export const BookCard: React.FC<BookCardProps> = ({ book, onSelect, onQuickBorrow }) => {
-  const isAvailable = book.stock > 0;
+  const availableCopies = book.available_copies ?? book.stock ?? 0;
+  const isAvailable = availableCopies > 0;
   const [imageError, setImageError] = useState(false);
+
+  const coverUrl = getBookCoverUrl(book.cover_path || book.coverUrl);
+  const categoryName = book.category_name || (typeof book.category === 'object' ? book.category?.name : book.category) || 'Umum';
+  const pubYear = book.publication_year || book.year || '-';
 
   return (
     <div className="group flex flex-col bg-white rounded-2xl border border-slate-200/90 shadow-sm hover:shadow-xl hover:border-amber-400/40 transition-all duration-300 overflow-hidden">
       {/* Cover Image Container */}
       <div className="relative aspect-[3/4] bg-slate-900 overflow-hidden cursor-pointer" onClick={() => onSelect(book)}>
-        {!imageError && book.coverUrl ? (
+        {!imageError && coverUrl ? (
           <img
-            src={book.coverUrl}
+            src={coverUrl}
             alt={`Sampul buku ${book.title}`}
             onError={() => setImageError(true)}
             className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500 ease-out"
@@ -40,12 +46,12 @@ export const BookCard: React.FC<BookCardProps> = ({ book, onSelect, onQuickBorro
           {isAvailable ? (
             <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-500 text-white shadow-md">
               <CheckCircle2 className="w-3 h-3" />
-              <span>Tersedia ({book.stock})</span>
+              <span>Tersedia ({availableCopies})</span>
             </span>
           ) : (
             <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-rose-600 text-white shadow-md">
               <AlertTriangle className="w-3 h-3" />
-              <span>Dipinjam</span>
+              <span>Habis</span>
             </span>
           )}
         </div>
@@ -54,7 +60,7 @@ export const BookCard: React.FC<BookCardProps> = ({ book, onSelect, onQuickBorro
         <div className="absolute bottom-3 left-3">
           <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium bg-slate-900/90 text-amber-300 border border-amber-400/20 backdrop-blur-sm shadow">
             <Tag className="w-3 h-3 text-amber-400" />
-            <span>{book.category}</span>
+            <span>{categoryName}</span>
           </span>
         </div>
       </div>
@@ -74,7 +80,7 @@ export const BookCard: React.FC<BookCardProps> = ({ book, onSelect, onQuickBorro
           </p>
 
           <p className="text-xs text-slate-500 mt-2 line-clamp-2 leading-relaxed">
-            {book.description}
+            {book.description || 'Tidak ada deskripsi sinopsis.'}
           </p>
         </div>
 
@@ -82,12 +88,12 @@ export const BookCard: React.FC<BookCardProps> = ({ book, onSelect, onQuickBorro
           {/* Metadata badges */}
           <div className="flex items-center justify-between text-[11px] text-slate-500">
             <span className="inline-flex items-center gap-1 text-slate-600 font-medium">
-              <MapPin className="w-3 h-3 text-amber-600 shrink-0" />
-              <span className="truncate max-w-[130px]">{book.shelfLocation}</span>
+              <FileText className="w-3 h-3 text-blue-900 shrink-0" />
+              <span className="truncate max-w-[130px]">{book.file_type ? book.file_type.toUpperCase() : 'Buku Fisik'}</span>
             </span>
             <span className="inline-flex items-center gap-1">
               <Calendar className="w-3 h-3 text-slate-400 shrink-0" />
-              <span>{book.year}</span>
+              <span>{pubYear}</span>
             </span>
           </div>
 
@@ -110,7 +116,7 @@ export const BookCard: React.FC<BookCardProps> = ({ book, onSelect, onQuickBorro
                   : 'bg-slate-100 text-slate-400 cursor-not-allowed'
               }`}
             >
-              {isAvailable ? 'Pinjam' : 'Kosong'}
+              {isAvailable ? 'Ajukan Pinjam' : 'Kosong'}
             </button>
           </div>
         </div>

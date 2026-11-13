@@ -1,13 +1,31 @@
-export type UserRole = 'admin' | 'user';
+export type UserRole = 'admin' | 'visitor' | 'user';
 
-export interface User {
+export interface Profile {
   id: string;
+  full_name: string;
   username: string;
-  fullName: string;
-  email: string;
   role: UserRole;
-  createdAt: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+// User interface backwards-compatible with context & views
+export interface User extends Profile {
+  email: string;
+  fullName?: string;
+  createdAt?: string;
   avatarUrl?: string;
+}
+
+export interface Category {
+  id: string;
+  name: string;
+  slug?: string;
+  description?: string | null;
+  is_active?: boolean;
+  created_by?: string | null;
+  created_at?: string;
+  bookCount?: number;
 }
 
 export interface Book {
@@ -15,50 +33,89 @@ export interface Book {
   title: string;
   author: string;
   publisher: string;
-  year: number;
+  publication_year: number;
   isbn: string;
-  category: string;
-  pages: number;
-  description: string;
-  coverUrl: string;
-  stock: number;
-  shelfLocation: string;
-  createdAt: string;
+  category_id: string;
+  description?: string | null;
+  cover_path?: string | null;
+  file_path?: string | null;
+  file_type?: string | null; // 'pdf' | 'epub'
+  total_copies: number;
+  available_copies: number;
+  is_published: boolean;
+  is_archived: boolean;
+  created_by?: string | null;
+  created_at?: string;
+  updated_at?: string;
+  // Computed / joined fields
+  category?: any;
+  category_name?: string;
+  // Backward compatibility aliases
+  stock?: number;
+  coverUrl?: string;
+  year?: number;
+  pages?: number;
+  shelfLocation?: string;
+  createdAt?: string;
 }
 
-export interface Category {
-  id: string;
-  name: string;
-  description?: string;
-  bookCount?: number;
-}
-
-export type LoanStatus = 'active' | 'returned' | 'overdue';
+/**
+ * PENTING: Status peminjaman wajib sesuai enum database:
+ * - pending
+ * - approved
+ * - rejected
+ * - borrowed
+ * - returned
+ * - expired
+ */
+export type LoanStatus = 'pending' | 'approved' | 'rejected' | 'borrowed' | 'returned' | 'expired';
 
 export interface Loan {
   id: string;
-  bookId: string;
-  bookTitle: string;
-  bookAuthor: string;
-  bookCover: string;
-  userId: string;
-  userName: string;
-  userEmail: string;
-  borrowDate: string; // YYYY-MM-DD
-  dueDate: string;    // YYYY-MM-DD
-  returnDate?: string; // YYYY-MM-DD
+  user_id: string;
+  book_id: string;
   status: LoanStatus;
-  notes?: string;
+  requested_at: string;
+  approved_at?: string | null;
+  due_at?: string | null;
+  returned_at?: string | null;
+  admin_note?: string | null;
+  created_at?: string;
+  updated_at?: string;
+  // Relasi join untuk kemudahan tampilan di antarmuka
+  book?: Book;
+  profile?: Profile;
+  // Backward compatibility aliases
+  userId?: string;
+  bookId?: string;
+  userName?: string;
+  userEmail?: string;
+  bookTitle?: string;
+  bookAuthor?: string;
+  bookCover?: string;
+  borrowDate?: string;
+  dueDate?: string;
+  returnDate?: string;
+}
+
+export interface ActivityLog {
+  id: string;
+  actor_id: string;
+  action: string;
+  entity_type: string;
+  entity_id?: string | null;
+  details?: any;
+  created_at: string;
+  actor_name?: string;
 }
 
 export interface MonthlyReportSummary {
-  period: string; // e.g. "2026-11"
-  periodLabel: string; // e.g. "November 2026"
+  period: string; // "YYYY-MM"
+  periodLabel: string;
   totalLoans: number;
   activeLoans: number;
   returnedLoans: number;
-  overdueLoans: number;
-  onTimeReturnRate: number; // percentage
+  pendingLoans: number;
   topBooks: Array<{
     bookId: string;
     title: string;
@@ -70,18 +127,4 @@ export interface MonthlyReportSummary {
     category: string;
     count: number;
   }>;
-  dailyTrend: Array<{
-    day: string;
-    count: number;
-  }>;
-}
-
-export interface AuthResponse {
-  token: string;
-  user: User;
-}
-
-export interface ApiError {
-  error: string;
-  details?: string;
 }

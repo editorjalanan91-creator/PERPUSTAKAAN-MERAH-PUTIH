@@ -1,18 +1,20 @@
-import React, { useState } from 'react';
-import { Book } from '../types';
+import React, { useState, useEffect } from 'react';
+import { Book, Loan } from '../types';
+import { getBookCoverUrl, getBookFileSignedUrl } from '../services/supabaseClient';
 import {
   X,
   BookOpen,
   Calendar,
   Building2,
   Bookmark,
-  FileText,
   Layers,
-  MapPin,
-  Clock,
   CheckCircle2,
   AlertCircle,
   Hash,
+  Clock,
+  FileText,
+  ExternalLink,
+  ShieldCheck,
 } from 'lucide-react';
 
 interface BookDetailModalProps {
@@ -20,6 +22,7 @@ interface BookDetailModalProps {
   onClose: () => void;
   onBorrow: (bookId: string, durationDays: number, notes?: string) => Promise<void>;
   isBorrowing?: boolean;
+  userLoan?: Loan | null;
 }
 
 export const BookDetailModal: React.FC<BookDetailModalProps> = ({
@@ -27,28 +30,53 @@ export const BookDetailModal: React.FC<BookDetailModalProps> = ({
   onClose,
   onBorrow,
   isBorrowing = false,
+  userLoan,
 }) => {
   if (!book) return null;
 
-  const [duration, setDuration] = useState<number>(7);
   const [notes, setNotes] = useState<string>('');
+  const [durationDays, setDurationDays] = useState<number>(7);
   const [imageError, setImageError] = useState<boolean>(false);
+  const [readingUrl, setReadingUrl] = useState<string | null>(null);
+  const [isLoadingReader, setIsLoadingReader] = useState<boolean>(false);
 
-  const isAvailable = book.stock > 0;
+  const isAvailable = (book.available_copies ?? 0) > 0;
+  const coverUrl = getBookCoverUrl(book.cover_path);
 
-  // Calculate return date preview
-  const estimatedReturnDate = new Date();
-  estimatedReturnDate.setDate(estimatedReturnDate.getDate() + duration);
-  const formattedReturnDate = new Intl.DateTimeFormat('id-ID', {
-    day: 'numeric',
-    month: 'long',
-    year: 'numeric',
-  }).format(estimatedReturnDate);
+  // Periksa apakah pengunjung memiliki hak akses membaca (peminjaman approved / borrowed dan belum expired)
+  const isApprovedToRead =
+    userLoan &&
+    (userLoan.status === 'approved' || userLoan.status === 'borrowed') &&
+    (!userLoan.due_at || new Date(userLoan.due_at).getTime() >= new Date().getTime());
+
+  const isPending = userLoan && userLoan.status === 'pending';
+
+  // Ambil signed URL jika disetujui membaca
+  const handleOpenReader = async () => {
+    if (!book.file_path) {
+      alert('File dokumen digital (PDF/EPUB) belum diunggah untuk buku ini.');
+      return;
+    }
+    setIsLoadingReader(true);
+    try {
+      const signedUrl = await getBookFileSignedUrl(book.file_path, 7200); // 2 jam masa berlaku
+      if (signedUrl) {
+        setReadingUrl(signedUrl);
+        window.open(signedUrl, '_blank', 'noopener,noreferrer');
+      } else {
+        alert('Gagal membuat tautan akses buku privat. Hubungi administrator.');
+      }
+    } catch (err: any) {
+      alert(`Terjadi kesalahan: ${err.message}`);
+    } finally {
+      setIsLoadingReader(false);
+    }
+  };
 
   const handleSubmitBorrow = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!isAvailable || isBorrowing) return;
-    await onBorrow(book.id, duration, notes);
+    if (!isAvailable || isBorrowing || isPending || isApprovedToRead) return;
+    await onBorrow(book.id, durationDays, notes);
   };
 
   return (
@@ -58,7 +86,7 @@ export const BookDetailModal: React.FC<BookDetailModalProps> = ({
         <div className="flex items-center justify-between px-6 py-4 bg-slate-900 text-white border-b border-slate-800">
           <div className="flex items-center gap-2.5">
             <BookOpen className="w-5 h-5 text-amber-400" />
-            <h2 className="font-bold text-base sm:text-lg">Detail Informasi Buku</h2>
+            <h2 className="font-bold text-base sm:text-lg">Detail Informasi Koleksi Buku</h2>
           </div>
           <button
             onClick={onClose}
@@ -75,9 +103,9 @@ export const BookDetailModal: React.FC<BookDetailModalProps> = ({
             {/* Left: Cover & Quick specs */}
             <div className="md:col-span-5 flex flex-col items-center">
               <div className="relative w-full max-w-[240px] aspect-[3/4] rounded-2xl overflow-hidden shadow-xl border border-slate-200 bg-slate-900">
-                {!imageError && book.coverUrl ? (
+                {!imageError && coverUrl ? (
                   <img
-                    src={book.coverUrl}
+                    src={coverUrl}
                     alt={book.title}
                     onError={() => setImageError(true)}
                     className="w-full h-full object-cover"
@@ -93,43 +121,56 @@ export const BookDetailModal: React.FC<BookDetailModalProps> = ({
                   {isAvailable ? (
                     <span className="px-3 py-1 rounded-full text-xs font-bold bg-emerald-500 text-white shadow-lg flex items-center gap-1">
                       <CheckCircle2 className="w-3.5 h-3.5" />
-                      Tersedia ({book.stock})
+                      Tersedia ({book.available_copies}/{book.total_copies})
                     </span>
                   ) : (
                     <span className="px-3 py-1 rounded-full text-xs font-bold bg-rose-600 text-white shadow-lg flex items-center gap-1">
                       <AlertCircle className="w-3.5 h-3.5" />
-                      Stok Habis
+                      Stok Habis (0/{book.total_copies})
                     </span>
                   )}
                 </div>
               </div>
 
-              {/* Shelf & Location Callout */}
-              <div className="mt-5 w-full p-4 rounded-2xl bg-amber-50/80 border border-amber-200/80 text-center">
-                <p className="text-[11px] font-semibold text-amber-800 uppercase tracking-wider mb-1 flex items-center justify-center gap-1.5">
-                  <MapPin className="w-3.5 h-3.5 text-amber-600" />
-                  Lokasi Rak Buku
-                </p>
-                <p className="text-base font-extrabold text-slate-900">
-                  {book.shelfLocation}
-                </p>
-                <p className="text-xs text-amber-700/80 mt-0.5">
-                  Tersedia {book.stock} eksemplar fisik di perpustakaan
-                </p>
-              </div>
+              {/* Status Peminjaman User Badge */}
+              {isApprovedToRead && (
+                <div className="mt-4 w-full p-3.5 rounded-2xl bg-emerald-50 border border-emerald-200 text-center">
+                  <div className="flex items-center justify-center gap-1.5 text-xs font-bold text-emerald-800">
+                    <ShieldCheck className="w-4 h-4 text-emerald-600" />
+                    <span>Peminjaman Aktif Disetujui</span>
+                  </div>
+                  {userLoan?.due_at && (
+                    <p className="text-[11px] text-emerald-700 mt-1">
+                      Batas Akses: {new Date(userLoan.due_at).toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {isPending && (
+                <div className="mt-4 w-full p-3.5 rounded-2xl bg-amber-50 border border-amber-200 text-center">
+                  <div className="flex items-center justify-center gap-1.5 text-xs font-bold text-amber-800">
+                    <Clock className="w-4 h-4 text-amber-600" />
+                    <span>Menunggu Persetujuan Admin</span>
+                  </div>
+                  <p className="text-[11px] text-amber-700 mt-1">
+                    Permintaan Anda sedang dalam antrean verifikasi administrator.
+                  </p>
+                </div>
+              )}
             </div>
 
-            {/* Right: Detailed Metadata & Synopsis */}
+            {/* Right: Detailed Metadata & Action */}
             <div className="md:col-span-7 flex flex-col justify-between">
               <div>
                 <div className="inline-block px-3 py-1 rounded-lg text-xs font-bold bg-blue-50 text-blue-900 border border-blue-200 mb-3">
-                  {book.category}
+                  {book.category_name || book.category?.name || 'Umum'}
                 </div>
                 <h1 className="text-2xl sm:text-3xl font-extrabold text-slate-900 leading-tight">
                   {book.title}
                 </h1>
                 <p className="text-sm font-semibold text-slate-600 mt-2">
-                  Oleh <span className="text-slate-900 underline decoration-amber-400 decoration-2">{book.author}</span>
+                  Penulis: <span className="text-slate-900 underline decoration-amber-400 decoration-2">{book.author}</span>
                 </p>
 
                 {/* Specs Grid */}
@@ -146,7 +187,7 @@ export const BookDetailModal: React.FC<BookDetailModalProps> = ({
                     <Calendar className="w-4 h-4 text-slate-400 mt-0.5 shrink-0" />
                     <div>
                       <p className="text-[11px] text-slate-500 font-medium">Tahun Terbit</p>
-                      <p className="text-xs font-semibold text-slate-800">{book.year}</p>
+                      <p className="text-xs font-semibold text-slate-800">{book.publication_year}</p>
                     </div>
                   </div>
 
@@ -159,10 +200,12 @@ export const BookDetailModal: React.FC<BookDetailModalProps> = ({
                   </div>
 
                   <div className="flex items-start gap-2.5">
-                    <Layers className="w-4 h-4 text-slate-400 mt-0.5 shrink-0" />
+                    <FileText className="w-4 h-4 text-slate-400 mt-0.5 shrink-0" />
                     <div>
-                      <p className="text-[11px] text-slate-500 font-medium">Jumlah Halaman</p>
-                      <p className="text-xs font-semibold text-slate-800">{book.pages} halaman</p>
+                      <p className="text-[11px] text-slate-500 font-medium">Format Dokumen</p>
+                      <p className="text-xs font-semibold text-slate-800 uppercase">
+                        {book.file_type || (book.file_path ? 'PDF' : 'Fisik')}
+                      </p>
                     </div>
                   </div>
                 </div>
@@ -170,52 +213,64 @@ export const BookDetailModal: React.FC<BookDetailModalProps> = ({
                 {/* Description */}
                 <div className="mt-6">
                   <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">
-                    Sinopsis / Deskripsi Buku
+                    Deskripsi / Sinopsis Buku
                   </h4>
                   <p className="text-sm text-slate-700 leading-relaxed whitespace-pre-line bg-white p-4 rounded-2xl border border-slate-100 shadow-sm">
-                    {book.description}
+                    {book.description || 'Tidak ada keterangan tambahan untuk buku ini.'}
                   </p>
                 </div>
               </div>
 
-              {/* Borrow Form Box */}
+              {/* Action Area */}
               <div className="mt-8 pt-6 border-t border-slate-200">
-                {isAvailable ? (
+                {isApprovedToRead ? (
+                  /* User has approved loan -> can read book */
+                  <div className="space-y-3">
+                    <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-200">
+                      <p className="text-xs font-semibold text-emerald-900 mb-2">
+                        🎉 Peminjaman Anda telah disetujui oleh admin. Anda dapat membaca file buku digital ini melalui tautan privat resmi:
+                      </p>
+                      <button
+                        type="button"
+                        onClick={handleOpenReader}
+                        disabled={isLoadingReader}
+                        className="w-full py-3 px-4 rounded-xl font-bold text-sm bg-gradient-to-r from-emerald-600 to-teal-700 hover:from-emerald-500 hover:to-teal-600 text-white shadow-lg shadow-emerald-600/20 active:scale-[0.99] transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                      >
+                        {isLoadingReader ? (
+                          <span className="inline-block w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                        ) : (
+                          <>
+                            <BookOpen className="w-4 h-4" />
+                            <span>Buka &amp; Baca Dokumen Buku ({book.file_type?.toUpperCase() || 'PDF'})</span>
+                            <ExternalLink className="w-3.5 h-3.5 ml-1" />
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                ) : isPending ? (
+                  <div className="p-4 rounded-2xl bg-amber-50 border border-amber-200 text-center">
+                    <p className="text-sm font-bold text-amber-900">
+                      Permintaan Peminjaman Telah Diajukan
+                    </p>
+                    <p className="text-xs text-amber-700 mt-1">
+                      Status permintaan Anda saat ini adalah <span className="font-semibold uppercase">Pending</span>. Tombol baca buku digital akan aktif secara otomatis setelah disetujui oleh administrator.
+                    </p>
+                  </div>
+                ) : isAvailable ? (
                   <form onSubmit={handleSubmitBorrow} className="space-y-4 bg-slate-50 p-4 rounded-2xl border border-slate-200">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold uppercase tracking-wide text-slate-700 flex items-center gap-1.5">
-                        <Clock className="w-4 h-4 text-amber-600" />
-                        Pilih Durasi Peminjaman:
-                      </span>
-                      <span className="text-xs text-slate-500">
-                        Batas kembali: <strong className="text-slate-800">{formattedReturnDate}</strong>
-                      </span>
+                    <div>
+                      <label className="block text-xs font-bold uppercase tracking-wide text-slate-700 mb-1.5">
+                        Ajukan Permintaan Peminjaman:
+                      </label>
+                      <input
+                        type="text"
+                        value={notes}
+                        onChange={(e) => setNotes(e.target.value)}
+                        placeholder="Catatan peminjaman (opsional, contoh: untuk keperluan skripsi/riset)"
+                        className="w-full px-3.5 py-2.5 text-xs rounded-xl bg-white border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-900/30 text-slate-800 placeholder-slate-400"
+                      />
                     </div>
-
-                    <div className="grid grid-cols-4 gap-2">
-                      {[3, 7, 10, 14].map((days) => (
-                        <button
-                          key={days}
-                          type="button"
-                          onClick={() => setDuration(days)}
-                          className={`py-2 px-3 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
-                            duration === days
-                              ? 'bg-blue-900 text-white shadow-sm ring-2 ring-blue-900/30'
-                              : 'bg-white text-slate-700 hover:bg-slate-100 border border-slate-200'
-                          }`}
-                        >
-                          {days} Hari
-                        </button>
-                      ))}
-                    </div>
-
-                    <input
-                      type="text"
-                      value={notes}
-                      onChange={(e) => setNotes(e.target.value)}
-                      placeholder="Catatan peminjaman (opsional, contoh: untuk keperluan tugas kuliah)"
-                      className="w-full px-3.5 py-2 text-xs rounded-xl bg-white border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-900/30 text-slate-800 placeholder-slate-400"
-                    />
 
                     <button
                       type="submit"
@@ -227,7 +282,7 @@ export const BookDetailModal: React.FC<BookDetailModalProps> = ({
                       ) : (
                         <>
                           <Bookmark className="w-4 h-4" />
-                          <span>Pinjam Buku Ini Sekarang</span>
+                          <span>Ajukan Peminjaman Buku</span>
                         </>
                       )}
                     </button>
@@ -238,7 +293,7 @@ export const BookDetailModal: React.FC<BookDetailModalProps> = ({
                       Seluruh eksemplar buku ini sedang dipinjam oleh anggota lain.
                     </p>
                     <p className="text-xs text-rose-600 mt-1">
-                      Silakan periksa kembali beberapa hari ke depan setelah ada pengembalian ke rak perpustakaan.
+                      Silakan periksa kembali beberapa hari ke depan setelah ada pengembalian ke perpustakaan.
                     </p>
                   </div>
                 )}

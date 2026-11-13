@@ -37,23 +37,29 @@ test('validateRegistration - fails on mismatched password and invalid email', ()
   assert.ok(result.errors.confirmPassword);
 });
 
-test('evaluateLoanStatus - handles active, overdue, and returned states', () => {
-  // Returned overrides dates
+test('evaluateLoanStatus - handles pending, approved, expired, and returned states', () => {
+  // Returned if returnedAt is present or status is returned
   assert.equal(
-    evaluateLoanStatus('2026-11-01', '2026-11-05', '2026-11-10'),
+    evaluateLoanStatus('2026-11-01', '2026-11-05', 'returned'),
     'returned'
   );
 
-  // Active if today is before or on dueDate
+  // Pending remains pending
   assert.equal(
-    evaluateLoanStatus('2026-11-15', undefined, '2026-11-09'),
-    'active'
+    evaluateLoanStatus(undefined, undefined, 'pending'),
+    'pending'
   );
 
-  // Overdue if today is after dueDate
+  // Approved and before dueAt
   assert.equal(
-    evaluateLoanStatus('2026-11-05', undefined, '2026-11-09'),
-    'overdue'
+    evaluateLoanStatus('2026-11-20', undefined, 'approved', '2026-11-12'),
+    'approved'
+  );
+
+  // Expired if today is after dueAt
+  assert.equal(
+    evaluateLoanStatus('2026-11-05', undefined, 'approved', '2026-11-12'),
+    'expired'
   );
 });
 
@@ -64,45 +70,45 @@ test('filterAndSortBooks - filters by query, category, availability and sorts', 
       title: 'Laskar Pelangi',
       author: 'Andrea Hirata',
       publisher: 'Bentang Pustaka',
-      year: 2005,
+      publication_year: 2005,
       isbn: '978-979-3062-79-2',
-      category: 'Fiksi & Sastra',
-      pages: 529,
-      description: 'Kisah tentang anak-anak di Belitung.',
-      coverUrl: 'https://example.com/cover1.jpg',
-      stock: 3,
-      shelfLocation: 'Rak A-01',
-      createdAt: '2026-01-01T00:00:00Z',
+      category_id: 'cat_1',
+      category_name: 'Fiksi & Sastra',
+      total_copies: 3,
+      available_copies: 3,
+      is_published: true,
+      is_archived: false,
+      created_at: '2026-01-01T00:00:00Z',
     },
     {
       id: 'b2',
       title: 'Sapiens: Riwayat Singkat Umat Manusia',
       author: 'Yuval Noah Harari',
       publisher: 'KPG',
-      year: 2014,
+      publication_year: 2014,
       isbn: '978-602-424-416-3',
-      category: 'Sains & Teknologi',
-      pages: 512,
-      description: 'Sejarah evolusi manusia.',
-      coverUrl: 'https://example.com/cover2.jpg',
-      stock: 0,
-      shelfLocation: 'Rak B-02',
-      createdAt: '2026-02-01T00:00:00Z',
+      category_id: 'cat_2',
+      category_name: 'Sains & Teknologi',
+      total_copies: 2,
+      available_copies: 0,
+      is_published: true,
+      is_archived: false,
+      created_at: '2026-02-01T00:00:00Z',
     },
     {
       id: 'b3',
       title: 'Bumi Manusia',
       author: 'Pramoedya Ananta Toer',
       publisher: 'Lentera Dipantara',
-      year: 1980,
+      publication_year: 1980,
       isbn: '978-979-97312-3-4',
-      category: 'Fiksi & Sastra',
-      pages: 535,
-      description: 'Kisah Minke di awal abad ke-20.',
-      coverUrl: 'https://example.com/cover3.jpg',
-      stock: 5,
-      shelfLocation: 'Rak A-02',
-      createdAt: '2026-03-01T00:00:00Z',
+      category_id: 'cat_1',
+      category_name: 'Fiksi & Sastra',
+      total_copies: 5,
+      available_copies: 5,
+      is_published: true,
+      is_archived: false,
+      created_at: '2026-03-01T00:00:00Z',
     },
   ];
 
@@ -118,7 +124,7 @@ test('filterAndSortBooks - filters by query, category, availability and sorts', 
   // Filter by availability: only available
   const availableOnly = filterAndSortBooks(mockBooks, { availability: 'available' });
   assert.equal(availableOnly.length, 2);
-  assert.ok(availableOnly.every((b) => b.stock > 0));
+  assert.ok(availableOnly.every((b) => b.available_copies > 0));
 
   // Sort by year desc
   const sortedYear = filterAndSortBooks(mockBooks, { sortBy: 'year-desc' });
@@ -130,43 +136,53 @@ test('aggregateMonthlyReport - calculates statistics correctly', () => {
   const sampleLoans: Loan[] = [
     {
       id: 'l1',
-      bookId: 'b1',
-      bookTitle: 'Laskar Pelangi',
-      bookAuthor: 'Andrea Hirata',
-      bookCover: '',
-      userId: 'u1',
-      userName: 'Ahmad',
-      userEmail: 'ahmad@test.com',
-      borrowDate: '2026-11-01',
-      dueDate: '2026-11-08',
-      returnDate: '2026-11-07',
+      user_id: 'u1',
+      book_id: 'b1',
       status: 'returned',
+      requested_at: '2026-11-01T00:00:00Z',
+      due_at: '2026-11-08T00:00:00Z',
+      returned_at: '2026-11-07T00:00:00Z',
+      book: {
+        id: 'b1',
+        title: 'Laskar Pelangi',
+        author: 'Andrea Hirata',
+        publisher: 'Bentang',
+        publication_year: 2005,
+        isbn: '123',
+        category_id: 'c1',
+        total_copies: 3,
+        available_copies: 2,
+        is_published: true,
+        is_archived: false,
+      },
     },
     {
       id: 'l2',
-      bookId: 'b1',
-      bookTitle: 'Laskar Pelangi',
-      bookAuthor: 'Andrea Hirata',
-      bookCover: '',
-      userId: 'u2',
-      userName: 'Siti',
-      userEmail: 'siti@test.com',
-      borrowDate: '2026-11-03',
-      dueDate: '2026-11-10',
-      status: 'active',
+      user_id: 'u2',
+      book_id: 'b1',
+      status: 'approved',
+      requested_at: '2026-11-03T00:00:00Z',
+      due_at: '2026-11-10T00:00:00Z',
+      book: {
+        id: 'b1',
+        title: 'Laskar Pelangi',
+        author: 'Andrea Hirata',
+        publisher: 'Bentang',
+        publication_year: 2005,
+        isbn: '123',
+        category_id: 'c1',
+        total_copies: 3,
+        available_copies: 2,
+        is_published: true,
+        is_archived: false,
+      },
     },
     {
       id: 'l3',
-      bookId: 'b3',
-      bookTitle: 'Bumi Manusia',
-      bookAuthor: 'Pramoedya',
-      bookCover: '',
-      userId: 'u1',
-      userName: 'Ahmad',
-      userEmail: 'ahmad@test.com',
-      borrowDate: '2026-11-02',
-      dueDate: '2026-11-05',
-      status: 'overdue',
+      user_id: 'u3',
+      book_id: 'b3',
+      status: 'pending',
+      requested_at: '2026-11-05T00:00:00Z',
     },
   ];
 
@@ -175,8 +191,7 @@ test('aggregateMonthlyReport - calculates statistics correctly', () => {
   assert.equal(report.totalLoans, 3);
   assert.equal(report.returnedLoans, 1);
   assert.equal(report.activeLoans, 1);
-  assert.equal(report.overdueLoans, 1);
-  assert.equal(report.onTimeReturnRate, 100); // 1 returned on time
+  assert.equal(report.pendingLoans, 1);
   assert.equal(report.topBooks[0].bookId, 'b1');
   assert.equal(report.topBooks[0].borrowCount, 2);
 });

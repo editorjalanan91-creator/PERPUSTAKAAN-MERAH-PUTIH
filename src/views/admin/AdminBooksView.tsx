@@ -1,28 +1,31 @@
 import React, { useState, useMemo } from 'react';
 import { Book, Category } from '../../types';
+import { getBookCoverUrl, uploadBookCover, uploadBookFile } from '../../services/supabaseClient';
 import {
   BookOpen,
   Plus,
   Search,
   Edit2,
   Trash2,
-  Eye,
-  MapPin,
+  Archive,
+  ArchiveRestore,
   Calendar,
-  Layers,
+  Building2,
+  FileText,
   Upload,
   X,
   CheckCircle2,
   AlertTriangle,
-  RotateCcw,
+  FileUp,
 } from 'lucide-react';
 
 interface AdminBooksViewProps {
   books: Book[];
   categories: Category[];
-  onAddBook: (bookData: Partial<Book>) => Promise<void>;
-  onUpdateBook: (id: string, bookData: Partial<Book>) => Promise<void>;
+  onAddBook: (bookData: any) => Promise<void>;
+  onUpdateBook: (id: string, bookData: any) => Promise<void>;
   onDeleteBook: (id: string) => Promise<void>;
+  onToggleArchive?: (id: string, isArchived: boolean) => Promise<void>;
   isAddModalOpen?: boolean;
   setIsAddModalOpen?: (open: boolean) => void;
 }
@@ -33,6 +36,7 @@ export const AdminBooksView: React.FC<AdminBooksViewProps> = ({
   onAddBook,
   onUpdateBook,
   onDeleteBook,
+  onToggleArchive,
   isAddModalOpen: controlledAddModalOpen,
   setIsAddModalOpen: setControlledAddModalOpen,
 }) => {
@@ -52,29 +56,35 @@ export const AdminBooksView: React.FC<AdminBooksViewProps> = ({
     title: '',
     author: '',
     publisher: '',
-    year: new Date().getFullYear(),
+    publication_year: new Date().getFullYear(),
     isbn: '',
-    category: categories[0]?.name || 'Fiksi & Sastra',
-    pages: 200,
+    category_id: categories[0]?.id || '',
     description: '',
-    coverUrl: 'https://images.unsplash.com/photo-1544947950-fa07a98d237f?auto=format&fit=crop&w=600&q=80',
-    stock: 5,
-    shelfLocation: 'Rak A-01',
+    cover_path: '',
+    file_path: '',
+    file_type: 'pdf',
+    total_copies: 5,
+    is_published: true,
   };
 
   const [formData, setFormData] = useState(initialFormState);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [previewError, setPreviewError] = useState(false);
+  const [uploadingCover, setUploadingCover] = useState(false);
+  const [uploadingDoc, setUploadingDoc] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
 
   const filteredBooks = useMemo(() => {
     return books.filter((b) => {
-      const matchCat = selectedCategory === 'Semua' || b.category.toLowerCase() === selectedCategory.toLowerCase();
+      const matchCat =
+        selectedCategory === 'Semua' ||
+        (b.category_name || '').toLowerCase() === selectedCategory.toLowerCase() ||
+        b.category_id === selectedCategory;
       const matchQuery =
         !searchQuery ||
         b.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
         b.author.toLowerCase().includes(searchQuery.toLowerCase()) ||
         b.isbn.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        b.shelfLocation.toLowerCase().includes(searchQuery.toLowerCase());
+        (b.publisher || '').toLowerCase().includes(searchQuery.toLowerCase());
       return matchCat && matchQuery;
     });
   }, [books, searchQuery, selectedCategory]);
@@ -82,10 +92,10 @@ export const AdminBooksView: React.FC<AdminBooksViewProps> = ({
   const openCreateModal = () => {
     setFormData({
       ...initialFormState,
-      category: categories[0]?.name || 'Fiksi & Sastra',
+      category_id: categories[0]?.id || '',
     });
     setEditingBook(null);
-    setPreviewError(false);
+    setFormError(null);
     setAddModalOpen(true);
   };
 
@@ -95,34 +105,63 @@ export const AdminBooksView: React.FC<AdminBooksViewProps> = ({
       title: book.title,
       author: book.author,
       publisher: book.publisher,
-      year: book.year,
+      publication_year: book.publication_year,
       isbn: book.isbn,
-      category: book.category,
-      pages: book.pages,
-      description: book.description,
-      coverUrl: book.coverUrl,
-      stock: book.stock,
-      shelfLocation: book.shelfLocation,
+      category_id: book.category_id,
+      description: book.description || '',
+      cover_path: book.cover_path || '',
+      file_path: book.file_path || '',
+      file_type: book.file_type || 'pdf',
+      total_copies: book.total_copies,
+      is_published: book.is_published,
     });
-    setPreviewError(false);
+    setFormError(null);
     setAddModalOpen(true);
   };
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  // Upload cover ke bucket 'book-covers'
+  const handleCoverUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        setFormData((prev) => ({ ...prev, coverUrl: reader.result as string }));
-        setPreviewError(false);
-      };
-      reader.readAsDataURL(file);
+    if (!file) return;
+
+    setUploadingCover(true);
+    setFormError(null);
+    try {
+      const coverPath = await uploadBookCover(file);
+      setFormData((prev) => ({ ...prev, cover_path: coverPath }));
+    } catch (err: any) {
+      setFormError(`Gagal upload sampul: ${err.message}`);
+    } finally {
+      setUploadingCover(false);
+    }
+  };
+
+  // Upload PDF / EPUB ke bucket 'book-files'
+  const handleDocUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setUploadingDoc(true);
+    setFormError(null);
+    try {
+      const { filePath, fileType } = await uploadBookFile(file);
+      setFormData((prev) => ({ ...prev, file_path: filePath, file_type: fileType }));
+    } catch (err: any) {
+      setFormError(`Gagal upload dokumen buku: ${err.message}`);
+    } finally {
+      setUploadingDoc(false);
     }
   };
 
   const handleFormSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!formData.title.trim() || !formData.author.trim() || !formData.category_id) {
+      setFormError('Judul, penulis, dan kategori buku wajib diisi.');
+      return;
+    }
+
     setIsSubmitting(true);
+    setFormError(null);
     try {
       if (editingBook) {
         await onUpdateBook(editingBook.id, formData);
@@ -131,8 +170,8 @@ export const AdminBooksView: React.FC<AdminBooksViewProps> = ({
       }
       setAddModalOpen(false);
       setEditingBook(null);
-    } catch {
-      // Notification is handled in parent
+    } catch (err: any) {
+      setFormError(err.message || 'Gagal menyimpan data buku ke Supabase.');
     } finally {
       setIsSubmitting(false);
     }
@@ -144,6 +183,8 @@ export const AdminBooksView: React.FC<AdminBooksViewProps> = ({
     try {
       await onDeleteBook(deletingBook.id);
       setDeletingBook(null);
+    } catch (err: any) {
+      alert(`Gagal menghapus buku: ${err.message}`);
     } finally {
       setIsSubmitting(false);
     }
@@ -154,11 +195,11 @@ export const AdminBooksView: React.FC<AdminBooksViewProps> = ({
       {/* Top Bar */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-200 pb-5">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900 tracking-tight">
+          <h1 className="text-2xl font-bold text-slate-900 tracking-tight font-brand">
             Manajemen Koleksi Buku
           </h1>
           <p className="text-xs text-slate-500 mt-1">
-            Kelola data buku, nomor ISBN, stok eksemplar, foto sampul, dan penempatan rak perpustakaan.
+            Kelola data buku, nomor ISBN, stok eksemplar, foto sampul (bucket public), dan dokumen PDF/EPUB (bucket private).
           </p>
         </div>
 
@@ -181,7 +222,7 @@ export const AdminBooksView: React.FC<AdminBooksViewProps> = ({
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Cari judul, penulis, ISBN, atau rak..."
+            placeholder="Cari judul, penulis, ISBN, atau penerbit..."
             className="w-full pl-10 pr-4 py-2 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-900/20"
           />
         </div>
@@ -203,224 +244,241 @@ export const AdminBooksView: React.FC<AdminBooksViewProps> = ({
         </div>
       </div>
 
-      {/* Books Table */}
-      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs">
-            <thead className="bg-slate-50 text-slate-600 uppercase tracking-wider border-b border-slate-200">
-              <tr>
-                <th className="py-3 px-4 font-semibold">Sampul &amp; Judul Buku</th>
-                <th className="py-3 px-4 font-semibold">Kategori</th>
-                <th className="py-3 px-4 font-semibold">ISBN</th>
-                <th className="py-3 px-4 font-semibold">Lokasi Rak</th>
-                <th className="py-3 px-4 font-semibold text-center">Stok</th>
-                <th className="py-3 px-4 font-semibold text-right">Aksi</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {filteredBooks.map((book) => (
-                <tr key={book.id} className="hover:bg-slate-50/80 transition-colors">
-                  <td className="py-3.5 px-4">
-                    <div className="flex items-center gap-3">
-                      <img
-                        src={book.coverUrl}
-                        alt={book.title}
-                        className="w-10 h-14 object-cover rounded-lg shadow-sm bg-slate-900 shrink-0"
-                      />
-                      <div className="min-w-0">
-                        <p className="font-bold text-slate-900 text-sm truncate max-w-xs">{book.title}</p>
-                        <p className="text-slate-500 text-xs mt-0.5">
-                          {book.author} • {book.publisher} ({book.year})
-                        </p>
-                        <p className="text-[11px] text-slate-400">{book.pages} halaman</p>
-                      </div>
-                    </div>
-                  </td>
-                  <td className="py-3.5 px-4">
-                    <span className="px-2 py-0.5 rounded text-[11px] font-semibold bg-blue-50 text-blue-900 border border-blue-200">
-                      {book.category}
-                    </span>
-                  </td>
-                  <td className="py-3.5 px-4 font-mono text-[11px] text-slate-600">
-                    {book.isbn}
-                  </td>
-                  <td className="py-3.5 px-4 font-medium text-slate-700">
-                    <span className="inline-flex items-center gap-1">
-                      <MapPin className="w-3 h-3 text-amber-600 shrink-0" />
-                      {book.shelfLocation}
-                    </span>
-                  </td>
-                  <td className="py-3.5 px-4 text-center">
-                    <span
-                      className={`inline-block px-2.5 py-1 rounded-full font-bold text-xs ${
-                        book.stock > 0
-                          ? 'bg-emerald-100 text-emerald-800'
-                          : 'bg-rose-100 text-rose-800'
-                      }`}
-                    >
-                      {book.stock} eks
-                    </span>
-                  </td>
-                  <td className="py-3.5 px-4 text-right">
-                    <div className="flex items-center justify-end gap-1.5">
-                      <button
-                        onClick={() => openEditModal(book)}
-                        className="p-1.5 rounded-lg text-slate-500 hover:text-blue-900 hover:bg-blue-50 transition-colors cursor-pointer"
-                        title="Ubah Buku"
-                        aria-label="Edit buku"
-                      >
-                        <Edit2 className="w-4 h-4" />
-                      </button>
-                      <button
-                        onClick={() => setDeletingBook(book)}
-                        className="p-1.5 rounded-lg text-slate-500 hover:text-rose-600 hover:bg-rose-50 transition-colors cursor-pointer"
-                        title="Hapus Buku"
-                        aria-label="Hapus buku"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-
-        {filteredBooks.length === 0 && (
-          <div className="p-12 text-center text-slate-500 text-xs">
-            {books.length === 0 ? (
-              <div className="flex flex-col items-center justify-center gap-3 max-w-sm mx-auto">
-                <div className="w-12 h-12 rounded-2xl bg-blue-50 text-blue-900 flex items-center justify-center">
-                  <BookOpen className="w-6 h-6" />
-                </div>
-                <div>
-                  <h4 className="font-bold text-sm text-slate-800">Daftar Buku Masih Kosong</h4>
-                  <p className="text-slate-500 text-xs mt-1">
-                    Belum ada data buku di sistem. Administrator dapat menambahkan koleksi buku baru sekarang.
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={openCreateModal}
-                  className="mt-1 inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-blue-900 hover:bg-blue-950 text-amber-300 font-bold text-xs shadow-sm cursor-pointer transition-colors"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                  <span>Tambah Buku Pertama</span>
-                </button>
-              </div>
-            ) : (
-              <div>Tidak ada buku yang sesuai dengan pencarian atau filter.</div>
-            )}
+      {/* Books Table / Grid */}
+      {filteredBooks.length === 0 ? (
+        <div className="bg-white rounded-3xl border border-dashed border-slate-300 p-12 text-center">
+          <div className="w-16 h-16 rounded-2xl bg-amber-500/10 text-amber-600 flex items-center justify-center mx-auto mb-4">
+            <BookOpen className="w-8 h-8" />
           </div>
-        )}
-      </div>
+          <h3 className="text-base font-bold text-slate-900 mb-1">
+            Belum Ada Koleksi Buku
+          </h3>
+          <p className="text-xs text-slate-500 max-w-md mx-auto mb-6">
+            Katalog buku masih kosong di database Supabase. Klik tombol di bawah untuk menambahkan buku pertama beserta sampul dan file digitalnya.
+          </p>
+          <button
+            onClick={openCreateModal}
+            className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-blue-900 hover:bg-blue-950 text-amber-300 font-bold text-xs shadow-md transition-all cursor-pointer"
+          >
+            <Plus className="w-4 h-4" />
+            <span>Tambah Buku Pertama</span>
+          </button>
+        </div>
+      ) : (
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse text-xs">
+              <thead>
+                <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 font-semibold uppercase tracking-wider text-[11px]">
+                  <th className="py-3 px-4">Buku &amp; Penulis</th>
+                  <th className="py-3 px-4">Kategori</th>
+                  <th className="py-3 px-4">Penerbit &amp; Tahun</th>
+                  <th className="py-3 px-4">Ketersediaan</th>
+                  <th className="py-3 px-4">File Dokumen</th>
+                  <th className="py-3 px-4">Status</th>
+                  <th className="py-3 px-4 text-right">Aksi</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {filteredBooks.map((book) => {
+                  const cover = getBookCoverUrl(book.cover_path);
+                  return (
+                    <tr key={book.id} className="hover:bg-slate-50/80 transition-colors">
+                      <td className="py-3 px-4">
+                        <div className="flex items-center gap-3">
+                          <img
+                            src={cover}
+                            alt={book.title}
+                            className="w-10 h-14 object-cover rounded-lg shadow-sm border border-slate-200 bg-slate-900 shrink-0"
+                          />
+                          <div className="min-w-0">
+                            <p className="font-bold text-slate-900 truncate max-w-[200px]" title={book.title}>
+                              {book.title}
+                            </p>
+                            <p className="text-[11px] text-slate-500 truncate max-w-[200px]">
+                              {book.author}
+                            </p>
+                            <span className="font-mono text-[10px] text-slate-400">
+                              ISBN: {book.isbn}
+                            </span>
+                          </div>
+                        </div>
+                      </td>
+                      <td className="py-3 px-4">
+                        <span className="inline-block px-2.5 py-1 rounded-lg text-[10px] font-semibold bg-blue-50 text-blue-800 border border-blue-200">
+                          {book.category_name || 'Umum'}
+                        </span>
+                      </td>
+                      <td className="py-3 px-4 text-slate-600">
+                        <p className="font-medium">{book.publisher}</p>
+                        <p className="text-[11px] text-slate-400">{book.publication_year}</p>
+                      </td>
+                      <td className="py-3 px-4">
+                        <span
+                          className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-bold ${
+                            book.available_copies > 0
+                              ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                              : 'bg-rose-50 text-rose-700 border border-rose-200'
+                          }`}
+                        >
+                          {book.available_copies} / {book.total_copies} Eksemplar
+                        </span>
+                      </td>
+                      <td className="py-3 px-4">
+                        {book.file_path ? (
+                          <span className="inline-flex items-center gap-1 text-[10px] font-bold text-slate-700 px-2 py-0.5 rounded bg-slate-100 uppercase">
+                            <FileText className="w-3 h-3 text-blue-600" />
+                            {book.file_type || 'PDF'}
+                          </span>
+                        ) : (
+                          <span className="text-[10px] text-slate-400 italic">Belum ada</span>
+                        )}
+                      </td>
+                      <td className="py-3 px-4">
+                        {book.is_archived ? (
+                          <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-slate-200 text-slate-700">
+                            Diarsipkan
+                          </span>
+                        ) : (
+                          <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-100 text-emerald-800">
+                            Aktif
+                          </span>
+                        )}
+                      </td>
+                      <td className="py-3 px-4 text-right space-x-1 whitespace-nowrap">
+                        <button
+                          onClick={() => openEditModal(book)}
+                          className="p-1.5 rounded-lg text-slate-600 hover:text-blue-900 hover:bg-slate-100 transition-colors"
+                          title="Ubah Buku"
+                        >
+                          <Edit2 className="w-3.5 h-3.5" />
+                        </button>
+                        {onToggleArchive && (
+                          <button
+                            onClick={() => onToggleArchive(book.id, !book.is_archived)}
+                            className="p-1.5 rounded-lg text-slate-600 hover:text-amber-800 hover:bg-slate-100 transition-colors"
+                            title={book.is_archived ? 'Pulihkan dari Arsip' : 'Arsipkan Buku'}
+                          >
+                            {book.is_archived ? (
+                              <ArchiveRestore className="w-3.5 h-3.5 text-amber-600" />
+                            ) : (
+                              <Archive className="w-3.5 h-3.5 text-slate-400" />
+                            )}
+                          </button>
+                        )}
+                        <button
+                          onClick={() => setDeletingBook(book)}
+                          className="p-1.5 rounded-lg text-slate-600 hover:text-rose-600 hover:bg-rose-50 transition-colors"
+                          title="Hapus Buku"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
-      {/* Add / Edit Book Modal */}
+      {/* Modal Tambah / Edit Buku */}
       {isAddModalOpen && (
-        <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-950/70 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="relative w-full max-w-2xl bg-white rounded-3xl shadow-2xl border border-slate-200 overflow-hidden flex flex-col max-h-[90vh]">
             <div className="px-6 py-4 bg-slate-900 text-white flex items-center justify-between border-b border-slate-800">
               <div className="flex items-center gap-2">
                 <BookOpen className="w-5 h-5 text-amber-400" />
-                <h3 className="font-bold text-base">
-                  {editingBook ? 'Ubah Informasi Buku' : 'Tambah Buku Baru ke Katalog'}
+                <h3 className="font-bold text-sm sm:text-base">
+                  {editingBook ? 'Ubah Data Buku' : 'Tambah Buku Baru'}
                 </h3>
               </div>
               <button
                 onClick={() => setAddModalOpen(false)}
-                className="p-1 rounded-lg text-slate-400 hover:text-white"
+                className="p-1 text-slate-400 hover:text-white"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <form onSubmit={handleFormSubmit} className="p-6 overflow-y-auto space-y-4 text-xs">
-              {/* Title & Author */}
+            <form onSubmit={handleFormSubmit} className="overflow-y-auto p-6 space-y-4 text-xs">
+              {formError && (
+                <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 shrink-0" />
+                  <span>{formError}</span>
+                </div>
+              )}
+
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className="block font-bold text-slate-700 uppercase tracking-wider mb-1">
-                    Judul Buku *
-                  </label>
+                <div className="sm:col-span-2">
+                  <label className="block font-semibold text-slate-700 mb-1">Judul Buku *</label>
                   <input
                     type="text"
                     required
                     value={formData.title}
                     onChange={(e) => setFormData({ ...formData, title: e.target.value })}
                     placeholder="Contoh: Laskar Pelangi"
-                    className="w-full p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-slate-900 text-xs focus:ring-2 focus:ring-blue-900/20"
+                    className="w-full px-3.5 py-2 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-900/30"
                   />
                 </div>
 
                 <div>
-                  <label className="block font-bold text-slate-700 uppercase tracking-wider mb-1">
-                    Nama Penulis *
-                  </label>
+                  <label className="block font-semibold text-slate-700 mb-1">Nama Penulis *</label>
                   <input
                     type="text"
                     required
                     value={formData.author}
                     onChange={(e) => setFormData({ ...formData, author: e.target.value })}
                     placeholder="Contoh: Andrea Hirata"
-                    className="w-full p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-slate-900 text-xs focus:ring-2 focus:ring-blue-900/20"
+                    className="w-full px-3.5 py-2 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-900/30"
                   />
                 </div>
-              </div>
 
-              {/* Publisher & Year */}
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                <div className="sm:col-span-2">
-                  <label className="block font-bold text-slate-700 uppercase tracking-wider mb-1">
-                    Penerbit
-                  </label>
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">Penerbit</label>
                   <input
                     type="text"
                     value={formData.publisher}
                     onChange={(e) => setFormData({ ...formData, publisher: e.target.value })}
                     placeholder="Contoh: Bentang Pustaka"
-                    className="w-full p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-slate-900 text-xs focus:ring-2 focus:ring-blue-900/20"
+                    className="w-full px-3.5 py-2 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-900/30"
                   />
                 </div>
 
                 <div>
-                  <label className="block font-bold text-slate-700 uppercase tracking-wider mb-1">
-                    Tahun Terbit
-                  </label>
+                  <label className="block font-semibold text-slate-700 mb-1">Tahun Terbit</label>
                   <input
                     type="number"
-                    value={formData.year}
-                    onChange={(e) => setFormData({ ...formData, year: parseInt(e.target.value, 10) || 2026 })}
-                    className="w-full p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-slate-900 text-xs focus:ring-2 focus:ring-blue-900/20"
+                    min="1800"
+                    max="2100"
+                    value={formData.publication_year}
+                    onChange={(e) => setFormData({ ...formData, publication_year: parseInt(e.target.value, 10) || 2026 })}
+                    className="w-full px-3.5 py-2 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-900/30"
                   />
                 </div>
-              </div>
 
-              {/* ISBN, Category, Pages */}
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div>
-                  <label className="block font-bold text-slate-700 uppercase tracking-wider mb-1">
-                    ISBN
-                  </label>
+                  <label className="block font-semibold text-slate-700 mb-1">Nomor ISBN</label>
                   <input
                     type="text"
                     value={formData.isbn}
                     onChange={(e) => setFormData({ ...formData, isbn: e.target.value })}
                     placeholder="978-602-..."
-                    className="w-full p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-slate-900 text-xs font-mono focus:ring-2 focus:ring-blue-900/20"
+                    className="w-full px-3.5 py-2 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-900/30"
                   />
                 </div>
 
                 <div>
-                  <label className="block font-bold text-slate-700 uppercase tracking-wider mb-1">
-                    Kategori Buku *
-                  </label>
+                  <label className="block font-semibold text-slate-700 mb-1">Kategori Buku *</label>
                   <select
-                    value={formData.category}
-                    onChange={(e) => setFormData({ ...formData, category: e.target.value })}
-                    className="w-full p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-slate-900 text-xs focus:ring-2 focus:ring-blue-900/20 cursor-pointer"
+                    required
+                    value={formData.category_id}
+                    onChange={(e) => setFormData({ ...formData, category_id: e.target.value })}
+                    className="w-full px-3.5 py-2 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-900/30 bg-white"
                   >
                     {categories.map((c) => (
-                      <option key={c.id} value={c.name}>
+                      <option key={c.id} value={c.id}>
                         {c.name}
                       </option>
                     ))}
@@ -428,126 +486,100 @@ export const AdminBooksView: React.FC<AdminBooksViewProps> = ({
                 </div>
 
                 <div>
-                  <label className="block font-bold text-slate-700 uppercase tracking-wider mb-1">
-                    Jumlah Halaman
-                  </label>
+                  <label className="block font-semibold text-slate-700 mb-1">Total Eksemplar / Stok *</label>
                   <input
                     type="number"
-                    value={formData.pages}
-                    onChange={(e) => setFormData({ ...formData, pages: parseInt(e.target.value, 10) || 100 })}
-                    className="w-full p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-slate-900 text-xs focus:ring-2 focus:ring-blue-900/20"
-                  />
-                </div>
-              </div>
-
-              {/* Stock & Shelf Location */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className="block font-bold text-slate-700 uppercase tracking-wider mb-1">
-                    Stok / Jumlah Eksemplar *
-                  </label>
-                  <input
-                    type="number"
-                    min={0}
+                    min="1"
                     required
-                    value={formData.stock}
-                    onChange={(e) => setFormData({ ...formData, stock: parseInt(e.target.value, 10) || 0 })}
-                    className="w-full p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-slate-900 text-xs focus:ring-2 focus:ring-blue-900/20"
+                    value={formData.total_copies}
+                    onChange={(e) => setFormData({ ...formData, total_copies: parseInt(e.target.value, 10) || 1 })}
+                    className="w-full px-3.5 py-2 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-900/30"
                   />
                 </div>
 
-                <div>
-                  <label className="block font-bold text-slate-700 uppercase tracking-wider mb-1">
-                    Lokasi Rak Buku *
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    value={formData.shelfLocation}
-                    onChange={(e) => setFormData({ ...formData, shelfLocation: e.target.value })}
-                    placeholder="Contoh: Rak Sastra A-01"
-                    className="w-full p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-slate-900 text-xs focus:ring-2 focus:ring-blue-900/20"
+                <div className="sm:col-span-2">
+                  <label className="block font-semibold text-slate-700 mb-1">Sinopsis / Deskripsi Buku</label>
+                  <textarea
+                    rows={3}
+                    value={formData.description}
+                    onChange={(e) => setFormData({ ...formData, description: e.target.value })}
+                    placeholder="Sinopsis singkat mengenai isi buku..."
+                    className="w-full px-3.5 py-2 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-900/30"
                   />
                 </div>
-              </div>
 
-              {/* Cover Image Upload / URL & Preview */}
-              <div className="space-y-2 p-3.5 rounded-2xl bg-slate-50 border border-slate-200">
-                <label className="block font-bold text-slate-700 uppercase tracking-wider">
-                  Foto Sampul Buku (URL atau Unggah File)
-                </label>
-                <div className="flex gap-4 items-center">
-                  <div className="w-16 h-22 rounded-xl bg-slate-900 overflow-hidden shadow shrink-0 border border-slate-200">
-                    <img
-                      src={formData.coverUrl}
-                      alt="Preview Sampul"
-                      onError={() => setPreviewError(true)}
-                      className="w-full h-full object-cover"
-                    />
-                  </div>
+                {/* File Upload Section: Storage Buckets */}
+                <div className="p-3.5 rounded-2xl bg-slate-50 border border-slate-200 sm:col-span-2 space-y-3">
+                  <p className="font-bold text-slate-800 uppercase tracking-wide text-[10px]">
+                    Berkas Supabase Storage
+                  </p>
 
-                  <div className="flex-1 space-y-2">
-                    <input
-                      type="url"
-                      value={formData.coverUrl}
-                      onChange={(e) => {
-                        setFormData({ ...formData, coverUrl: e.target.value });
-                        setPreviewError(false);
-                      }}
-                      placeholder="Masukkan URL foto sampul (https://...)"
-                      className="w-full p-2 rounded-xl bg-white border border-slate-200 text-xs text-slate-800"
-                    />
-
-                    <div className="flex items-center gap-2">
-                      <label className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white border border-slate-300 hover:bg-slate-100 text-[11px] font-semibold text-slate-700 cursor-pointer">
-                        <Upload className="w-3.5 h-3.5 text-blue-900" />
-                        <span>Unggah File dari Komputer</span>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    {/* Cover Upload (Public) */}
+                    <div>
+                      <label className="block font-medium text-slate-700 mb-1">
+                        Foto Sampul (Bucket: book-covers)
+                      </label>
+                      <label className="flex items-center gap-2 px-3 py-2 border border-dashed border-slate-300 rounded-xl bg-white hover:bg-slate-50 cursor-pointer">
+                        <Upload className="w-4 h-4 text-amber-600" />
+                        <span className="truncate">
+                          {uploadingCover
+                            ? 'Mengunggah sampul...'
+                            : formData.cover_path
+                            ? 'Sampul Terunggah ✓'
+                            : 'Pilih File Gambar'}
+                        </span>
                         <input
                           type="file"
                           accept="image/*"
-                          onChange={handleFileUpload}
+                          onChange={handleCoverUpload}
+                          disabled={uploadingCover}
                           className="hidden"
                         />
                       </label>
-                      <span className="text-[10px] text-slate-400">JPG, PNG, atau WebP</span>
+                    </div>
+
+                    {/* Book Document Upload (Private) */}
+                    <div>
+                      <label className="block font-medium text-slate-700 mb-1">
+                        Dokumen Buku (Bucket: book-files [PDF/EPUB])
+                      </label>
+                      <label className="flex items-center gap-2 px-3 py-2 border border-dashed border-slate-300 rounded-xl bg-white hover:bg-slate-50 cursor-pointer">
+                        <FileUp className="w-4 h-4 text-blue-600" />
+                        <span className="truncate">
+                          {uploadingDoc
+                            ? 'Mengunggah dokumen...'
+                            : formData.file_path
+                            ? 'Dokumen Terunggah ✓'
+                            : 'Pilih File PDF/EPUB'}
+                        </span>
+                        <input
+                          type="file"
+                          accept=".pdf,.epub"
+                          onChange={handleDocUpload}
+                          disabled={uploadingDoc}
+                          className="hidden"
+                        />
+                      </label>
                     </div>
                   </div>
                 </div>
               </div>
 
-              {/* Description */}
-              <div>
-                <label className="block font-bold text-slate-700 uppercase tracking-wider mb-1">
-                  Deskripsi / Sinopsis Buku
-                </label>
-                <textarea
-                  rows={3}
-                  value={formData.description}
-                  onChange={(e) => setFormData({ ...formData, description: e.target.value })}
-                  placeholder="Ringkasan sinopsis atau isi buku..."
-                  className="w-full p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-slate-900 text-xs focus:ring-2 focus:ring-blue-900/20"
-                />
-              </div>
-
-              {/* Actions */}
-              <div className="pt-3 flex items-center justify-end gap-2 border-t border-slate-100">
+              <div className="pt-4 border-t border-slate-200 flex items-center justify-end gap-2">
                 <button
                   type="button"
                   onClick={() => setAddModalOpen(false)}
-                  className="px-4 py-2.5 rounded-xl text-slate-600 hover:bg-slate-100 font-semibold cursor-pointer"
+                  className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold"
                 >
                   Batal
                 </button>
                 <button
                   type="submit"
-                  disabled={isSubmitting}
-                  className="px-5 py-2.5 rounded-xl bg-blue-900 hover:bg-blue-950 text-amber-300 font-bold shadow-md cursor-pointer disabled:opacity-50"
+                  disabled={isSubmitting || uploadingCover || uploadingDoc}
+                  className="px-5 py-2 rounded-xl bg-blue-900 hover:bg-blue-950 text-amber-300 font-bold shadow-md disabled:opacity-50"
                 >
-                  {isSubmitting
-                    ? 'Menyimpan...'
-                    : editingBook
-                    ? 'Simpan Perubahan Buku'
-                    : 'Tambah Buku ke Koleksi'}
+                  {isSubmitting ? 'Menyimpan...' : editingBook ? 'Simpan Perubahan' : 'Tambah Buku'}
                 </button>
               </div>
             </form>
@@ -555,37 +587,32 @@ export const AdminBooksView: React.FC<AdminBooksViewProps> = ({
         </div>
       )}
 
-      {/* Delete Confirmation Modal */}
+      {/* Modal Konfirmasi Hapus */}
       {deletingBook && (
-        <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="relative w-full max-w-md bg-white rounded-3xl shadow-2xl border border-slate-200 p-6 space-y-4">
-            <div className="w-12 h-12 rounded-2xl bg-rose-50 text-rose-600 flex items-center justify-center">
+        <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-md bg-white rounded-2xl p-6 text-center space-y-4">
+            <div className="w-12 h-12 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center mx-auto">
               <Trash2 className="w-6 h-6" />
             </div>
-
             <div>
-              <h3 className="font-bold text-base text-slate-900">Konfirmasi Hapus Buku</h3>
-              <p className="text-xs text-slate-500 mt-1 leading-relaxed">
-                Apakah Anda yakin ingin menghapus buku{' '}
-                <strong className="text-slate-900">"{deletingBook.title}"</strong>? Tindakan ini akan menghapus buku secara permanen dari sistem dan katalog pengunjung.
+              <h3 className="text-base font-bold text-slate-900">Hapus Koleksi Buku?</h3>
+              <p className="text-xs text-slate-500 mt-1">
+                Apakah Anda yakin ingin menghapus buku <strong>"{deletingBook.title}"</strong> dari database? Tindakan ini tidak dapat dibatalkan.
               </p>
             </div>
-
-            <div className="flex items-center justify-end gap-2 pt-2">
+            <div className="flex gap-2 justify-center pt-2">
               <button
-                type="button"
                 onClick={() => setDeletingBook(null)}
-                className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-100 cursor-pointer"
+                className="px-4 py-2 rounded-xl bg-slate-100 text-slate-700 font-semibold text-xs"
               >
                 Batal
               </button>
               <button
-                type="button"
-                disabled={isSubmitting}
                 onClick={handleDeleteConfirm}
-                className="px-4 py-2 rounded-xl text-xs font-bold bg-rose-600 hover:bg-rose-700 text-white shadow-sm cursor-pointer disabled:opacity-50"
+                disabled={isSubmitting}
+                className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs"
               >
-                {isSubmitting ? 'Menghapus...' : 'Ya, Hapus Buku Ini'}
+                {isSubmitting ? 'Menghapus...' : 'Ya, Hapus Buku'}
               </button>
             </div>
           </div>
