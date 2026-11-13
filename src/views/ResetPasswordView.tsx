@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { RESET_PASSWORD_REDIRECT_URL } from '../services/supabaseClient';
 import {
   BookOpen,
   Lock,
@@ -127,7 +126,7 @@ export const ResetPasswordView: React.FC<ResetPasswordViewProps> = ({ onBackToLo
             PERPUSTAKAAN MERAH PUTIH
           </h1>
           <p className="text-sm text-slate-400 max-w-sm mx-auto">
-            Pemulihan Kata Sandi Akun Perpustakaan melalui Supabase Authentication.
+            Pemulihan kata sandi akun untuk mengakses layanan Perpustakaan Merah Putih.
           </p>
         </div>
 
@@ -145,7 +144,7 @@ export const ResetPasswordView: React.FC<ResetPasswordViewProps> = ({ onBackToLo
                   Password Berhasil Diperbarui
                 </h2>
                 <p className="text-xs text-slate-300 leading-relaxed max-w-sm mx-auto">
-                  Kata sandi akun Anda telah diperbarui dengan aman di Supabase Auth. Hak akses serta role akun Anda tetap terjaga.
+                  Kata sandi akun Anda telah diperbarui dengan aman. Silakan masuk kembali untuk melanjutkan aktivitas Anda.
                 </p>
               </div>
 
@@ -277,7 +276,7 @@ export const ResetPasswordView: React.FC<ResetPasswordViewProps> = ({ onBackToLo
                   Tautan Pemulihan Terkirim
                 </h2>
                 <p className="text-xs text-slate-300 leading-relaxed max-w-sm mx-auto">
-                  Jika email tersebut terdaftar di Supabase Authentication, tautan pemulihan password telah dikirimkan ke:
+                  Tautan pemulihan kata sandi telah dikirimkan ke alamat email terdaftar:
                 </p>
                 <p className="text-sm font-semibold text-amber-400 mt-1 font-mono">
                   {sentToEmail}
@@ -324,9 +323,9 @@ export const ResetPasswordView: React.FC<ResetPasswordViewProps> = ({ onBackToLo
                 </div>
               )}
 
-              <form onSubmit={handleRequestResetSubmit} className="space-y-4">
+              <form onSubmit={handleRequestResetSubmit} className="space-y-5">
                 <div>
-                  <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">
+                  <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2">
                     Username Admin atau Email Terdaftar
                   </label>
                   <div className="relative">
@@ -342,9 +341,6 @@ export const ResetPasswordView: React.FC<ResetPasswordViewProps> = ({ onBackToLo
                       className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-slate-950/80 border border-slate-700/80 text-white placeholder-slate-500 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/50 focus:border-amber-500 transition-all"
                     />
                   </div>
-                  <p className="text-[11px] text-slate-500 mt-1.5">
-                    Callback diarahkan ke: <span className="font-mono text-slate-400">{RESET_PASSWORD_REDIRECT_URL}</span>
-                  </p>
                 </div>
 
                 <button
@@ -380,7 +376,7 @@ export const ResetPasswordView: React.FC<ResetPasswordViewProps> = ({ onBackToLo
 
         {/* Footer info */}
         <div className="mt-8 text-center text-xs text-slate-500">
-          <p>© 2026 PERPUSTAKAAN MERAH PUTIH • Terintegrasi Supabase Cloud &amp; RLS Security</p>
+          <p>© 2026 PERPUSTAKAAN MERAH PUTIH • Sistem Informasi Perpustakaan Digital</p>
         </div>
       </div>
     </div>
