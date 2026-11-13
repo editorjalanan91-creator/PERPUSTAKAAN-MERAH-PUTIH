@@ -4,9 +4,13 @@ import { BookOpen, User, Lock, Mail, UserPlus, LogIn, Eye, EyeOff, MailCheck, Ar
 
 interface AuthViewProps {
   initialMode?: 'login' | 'register';
+  onOpenForgotPassword?: () => void;
 }
 
-export const AuthView: React.FC<AuthViewProps> = ({ initialMode = 'login' }) => {
+export const AuthView: React.FC<AuthViewProps> = ({
+  initialMode = 'login',
+  onOpenForgotPassword,
+}) => {
   const { login, register } = useAuth();
   const [mode, setMode] = useState<'login' | 'register'>(initialMode);
 
@@ -212,9 +216,20 @@ export const AuthView: React.FC<AuthViewProps> = ({ initialMode = 'login' }) => 
                     </div>
 
                     <div>
-                      <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2">
-                        Kata Sandi
-                      </label>
+                      <div className="flex items-center justify-between mb-2">
+                        <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider">
+                          Kata Sandi
+                        </label>
+                        {onOpenForgotPassword && (
+                          <button
+                            type="button"
+                            onClick={onOpenForgotPassword}
+                            className="text-xs font-semibold text-amber-400 hover:text-amber-300 transition-colors cursor-pointer"
+                          >
+                            Lupa Password?
+                          </button>
+                        )}
+                      </div>
                       <div className="relative">
                         <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
                           <Lock className="w-4 h-4" />

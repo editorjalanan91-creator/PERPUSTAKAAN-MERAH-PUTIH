@@ -3,6 +3,7 @@ import { User, Profile, UserRole } from '../types';
 import {
   supabase,
   ADMIN_EMAIL,
+  RESET_PASSWORD_REDIRECT_URL,
   getSupabaseConfigError,
   recordActivityLog,
 } from '../services/supabaseClient';
@@ -21,6 +22,7 @@ interface AuthContextType {
   isLoading: boolean;
   isAdmin: boolean;
   isUser: boolean;
+  isPasswordRecovery: boolean;
   login: (identifier: string, password: string) => Promise<User>;
   register: (payload: {
     fullName: string;
@@ -29,6 +31,9 @@ interface AuthContextType {
     password: string;
     confirmPassword: string;
   }) => Promise<{ requiresVerification: boolean; email: string }>;
+  requestPasswordReset: (identifier: string) => Promise<{ email: string }>;
+  confirmPasswordReset: (newPassword: string) => Promise<void>;
+  clearPasswordRecovery: () => Promise<void>;
   logout: () => Promise<void>;
   updateProfile: (updates: { full_name?: string; username?: string }) => Promise<void>;
   refreshProfile: () => Promise<void>;
@@ -41,6 +46,16 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 const VALID_ROLES: UserRole[] = ['admin', 'visitor', 'user'];
+
+function hasRecoveryParamsInUrl(): boolean {
+  if (typeof window === 'undefined') return false;
+  const hash = window.location.hash || '';
+  const search = window.location.search || '';
+  return (
+    hash.includes('type=recovery') ||
+    search.includes('type=recovery')
+  );
+}
 
 function formatSupabaseAuthError(rawMessage: string): string {
   const msg = (rawMessage || '').trim();
@@ -64,7 +79,7 @@ function formatSupabaseAuthError(rawMessage: string): string {
   }
 
   if (lower.includes('email rate limit exceeded') || lower.includes('over_email_send_rate_limit')) {
-    return 'Terlalu banyak permintaan pendaftaran atau email verifikasi. Harap tunggu beberapa menit lalu coba kembali.';
+    return 'Terlalu banyak permintaan ke server email. Harap tunggu beberapa menit lalu coba kembali.';
   }
 
   if (lower.includes('email not confirmed')) {
@@ -79,12 +94,19 @@ function formatSupabaseAuthError(rawMessage: string): string {
     return 'Format alamat email tidak valid.';
   }
 
-  if (lower.includes('password should be at least')) {
+  if (lower.includes('password should be at least') || lower.includes('new password should be different')) {
+    if (lower.includes('different')) {
+      return 'Kata sandi baru tidak boleh sama dengan kata sandi lama Anda.';
+    }
     return 'Kata sandi minimal harus 6 karakter.';
   }
 
   if (lower.includes('signup is disabled') || lower.includes('signups not allowed')) {
     return 'Pendaftaran akun baru saat ini dinonaktifkan pada pengaturan Supabase Auth.';
+  }
+
+  if (lower.includes('auth session missing')) {
+    return 'Sesi pemulihan password tidak ditemukan atau sudah kedaluwarsa. Silakan ajukan tautan pemulihan password baru.';
   }
 
   return msg || 'Terjadi kesalahan pada layanan autentikasi Supabase.';
@@ -93,6 +115,7 @@ function formatSupabaseAuthError(rawMessage: string): string {
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [isPasswordRecovery, setIsPasswordRecovery] = useState<boolean>(() => hasRecoveryParamsInUrl());
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
 
   const showToast = (message: string, type: 'success' | 'error' | 'info' = 'success', title?: string) => {
@@ -147,9 +170,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
-  // Bootstrap & Listen to Supabase Auth State Changes
+  // Bootstrap & Listen to Supabase Auth State Changes (termasuk PASSWORD_RECOVERY)
   useEffect(() => {
     let isMounted = true;
+    const initialRecoveryUrl = hasRecoveryParamsInUrl();
 
     const resolveSessionUser = async (
       authUser: { id: string; email?: string | null; email_confirmed_at?: string | null } | null
@@ -182,6 +206,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           return;
         }
         const { data: { session } } = await supabase.auth.getSession();
+        if (initialRecoveryUrl && session?.user && isMounted) {
+          setIsPasswordRecovery(true);
+        }
         await resolveSessionUser(session?.user ?? null);
       } catch (err) {
         console.error('Error saat inisialisasi Supabase auth session:', err);
@@ -192,7 +219,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     initAuth();
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+      if (event === 'PASSWORD_RECOVERY') {
+        if (isMounted) setIsPasswordRecovery(true);
+      }
       await resolveSessionUser(session?.user ?? null);
       if (isMounted) setIsLoading(false);
     });
@@ -257,6 +287,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       throw new Error('Email Anda belum diverifikasi. Harap buka tautan verifikasi yang dikirimkan ke email Anda terlebih dahulu.');
     }
 
+    setIsPasswordRecovery(false);
     setUser(profile);
 
     // Catat log aktivitas login
@@ -357,6 +388,113 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   /**
+   * Mengirim tautan pemulihan password menggunakan Supabase Auth resetPasswordForEmail().
+   * - Mendukung username "Admin" (dipetakan ke VITE_ADMIN_EMAIL) atau email terdaftar langsung.
+   * - Mengarahkan callback ke https://perpustakaan-merah-putih.vercel.app/reset-password.
+   * - Tidak pernah membuat akun administrator baru maupun mengubah role.
+   */
+  const requestPasswordReset = async (identifier: string): Promise<{ email: string }> => {
+    const configErr = getSupabaseConfigError();
+    if (configErr) {
+      throw new Error(configErr);
+    }
+
+    const trimmed = identifier.trim();
+    if (!trimmed) {
+      throw new Error('Harap masukkan username Admin atau alamat email terdaftar.');
+    }
+
+    let emailToUse = trimmed.toLowerCase();
+    if (trimmed.toLowerCase() === 'admin') {
+      emailToUse = ADMIN_EMAIL.trim().toLowerCase();
+    }
+
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(emailToUse)) {
+      throw new Error('Format alamat email tidak valid. Masukkan username "Admin" atau email yang valid.');
+    }
+
+    let resetResult;
+    try {
+      resetResult = await supabase.auth.resetPasswordForEmail(emailToUse, {
+        redirectTo: RESET_PASSWORD_REDIRECT_URL,
+      });
+    } catch (networkErr: any) {
+      throw new Error(formatSupabaseAuthError(networkErr?.message || 'Failed to fetch'));
+    }
+
+    if (resetResult.error) {
+      throw new Error(formatSupabaseAuthError(resetResult.error.message));
+    }
+
+    showToast(
+      'Tautan pemulihan password telah dikirim ke email Anda. Periksa kotak masuk atau folder spam.',
+      'info',
+      'Email Pemulihan Terkirim'
+    );
+
+    return { email: emailToUse };
+  };
+
+  /**
+   * Memperbarui kata sandi melalui sesi PASSWORD_RECOVERY menggunakan supabase.auth.updateUser({ password }).
+   * - Tidak mengubah role pada tabel profiles.
+   * - Tidak pernah mencatat password ke log.
+   */
+  const confirmPasswordReset = async (newPassword: string): Promise<void> => {
+    const configErr = getSupabaseConfigError();
+    if (configErr) {
+      throw new Error(configErr);
+    }
+
+    if (!newPassword || newPassword.length < 6) {
+      throw new Error('Kata sandi baru minimal harus 6 karakter.');
+    }
+
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session?.user) {
+      throw new Error('Sesi pemulihan password tidak ditemukan atau sudah kedaluwarsa. Silakan minta tautan pemulihan baru.');
+    }
+
+    let updateResult;
+    try {
+      updateResult = await supabase.auth.updateUser({
+        password: newPassword,
+      });
+    } catch (networkErr: any) {
+      throw new Error(formatSupabaseAuthError(networkErr?.message || 'Failed to fetch'));
+    }
+
+    if (updateResult.error) {
+      throw new Error(formatSupabaseAuthError(updateResult.error.message));
+    }
+
+    // Catat log aktivitas pembaruan password tanpa menyertakan nilai password
+    if (updateResult.data?.user?.id) {
+      recordActivityLog(updateResult.data.user.id, 'password_recovery_completed', 'profiles', updateResult.data.user.id, {
+        updated_at: new Date().toISOString(),
+      });
+    }
+
+    // Keluarkan sesi sementara agar pengguna dapat masuk kembali dengan kata sandi baru secara eksplisit
+    await supabase.auth.signOut().catch(() => undefined);
+    setUser(null);
+
+    showToast(
+      'Password berhasil diperbarui! Silakan masuk menggunakan kata sandi baru Anda.',
+      'success',
+      'Password Diperbarui'
+    );
+  };
+
+  const clearPasswordRecovery = async () => {
+    setIsPasswordRecovery(false);
+    if (typeof window !== 'undefined' && window.location.pathname === '/reset-password') {
+      window.history.replaceState({}, '', '/');
+    }
+  };
+
+  /**
    * Logout dari Supabase Auth
    */
   const logout = async () => {
@@ -368,6 +506,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     } catch (err) {
       console.warn('Error saat logout:', err);
     } finally {
+      setIsPasswordRecovery(false);
       setUser(null);
       showToast('Anda telah keluar dari sistem.', 'info');
     }
@@ -431,8 +570,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         isLoading,
         isAdmin,
         isUser,
+        isPasswordRecovery,
         login,
         register,
+        requestPasswordReset,
+        confirmPasswordReset,
+        clearPasswordRecovery,
         logout,
         updateProfile,
         refreshProfile,

@@ -3,6 +3,7 @@ import { AuthProvider, useAuth } from './context/AuthContext';
 import { libraryService } from './services/libraryService';
 import { Book, Category, Loan, Profile, ActivityLog } from './types';
 import { AuthView } from './views/AuthView';
+import { ResetPasswordView } from './views/ResetPasswordView';
 import { ToastContainer } from './components/ToastContainer';
 import { UserNavbar } from './components/UserNavbar';
 import { UserHomeView } from './views/UserHomeView';
@@ -19,7 +20,34 @@ import { AdminUsersView } from './views/admin/AdminUsersView';
 import { AdminReportsView } from './views/admin/AdminReportsView';
 
 function LibraryApp() {
-  const { user, profile, isLoading, isAdmin, showToast } = useAuth();
+  const { user, profile, isLoading, isAdmin, isPasswordRecovery, clearPasswordRecovery, showToast } = useAuth();
+  const [isResetPasswordRoute, setIsResetPasswordRoute] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    return window.location.pathname === '/reset-password';
+  });
+
+  useEffect(() => {
+    const handlePopState = () => {
+      setIsResetPasswordRoute(window.location.pathname === '/reset-password');
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
+  const navigateToResetPassword = () => {
+    if (typeof window !== 'undefined' && window.location.pathname !== '/reset-password') {
+      window.history.pushState({}, '', '/reset-password');
+    }
+    setIsResetPasswordRoute(true);
+  };
+
+  const handleBackToLogin = async () => {
+    await clearPasswordRecovery();
+    if (typeof window !== 'undefined' && window.location.pathname === '/reset-password') {
+      window.history.replaceState({}, '', '/');
+    }
+    setIsResetPasswordRoute(false);
+  };
 
   // App Data State (Backed by Supabase)
   const [books, setBooks] = useState<Book[]>([]);
@@ -78,7 +106,7 @@ function LibraryApp() {
 
   // Initial load and Realtime Subscriptions
   useEffect(() => {
-    if (!user) return;
+    if (!user || isPasswordRecovery) return;
 
     loadData(true);
 
@@ -92,7 +120,7 @@ function LibraryApp() {
     return () => {
       unsubscribe();
     };
-  }, [user, loadData]);
+  }, [user, isPasswordRecovery, loadData]);
 
   // Handle Book Loan Request (Status: pending)
   const handleBorrowBook = async (bookId: string, durationDays: number, notes?: string) => {
@@ -245,11 +273,21 @@ function LibraryApp() {
     );
   }
 
+  // PASSWORD RECOVERY & /reset-password ROUTE
+  if (isPasswordRecovery || isResetPasswordRoute) {
+    return (
+      <>
+        <ResetPasswordView onBackToLogin={handleBackToLogin} />
+        <ToastContainer />
+      </>
+    );
+  }
+
   // STRICT ACCESS CONTROL: Unauthenticated users MUST see the Login/Register gateway
   if (!user) {
     return (
       <>
-        <AuthView />
+        <AuthView onOpenForgotPassword={navigateToResetPassword} />
         <ToastContainer />
       </>
     );
