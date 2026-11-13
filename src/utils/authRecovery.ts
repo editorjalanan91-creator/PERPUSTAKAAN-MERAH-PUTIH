@@ -129,8 +129,9 @@ export function validateNewPasswordInput(
 export function shouldRenderResetPasswordView(params: {
   isPasswordRecovery: boolean;
   isResetPasswordRoute: boolean;
+  hasRecoveryError?: boolean;
 }): boolean {
-  return params.isPasswordRecovery || params.isResetPasswordRoute;
+  return params.isPasswordRecovery || params.isResetPasswordRoute || Boolean(params.hasRecoveryError);
 }
 
 /**

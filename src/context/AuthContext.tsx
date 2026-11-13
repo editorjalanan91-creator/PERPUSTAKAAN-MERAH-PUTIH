@@ -183,6 +183,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   // Bootstrap & Dengarkan perubahan state auth Supabase (termasuk PASSWORD_RECOVERY)
   useEffect(() => {
     let isMounted = true;
+    let initCompleted = false;
 
     const resolveSessionUser = async (
       authUser: { id: string; email?: string | null; email_confirmed_at?: string | null } | null,
@@ -219,7 +220,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setRecoveryEmail(session?.user?.email ?? null);
         setRecoveryLinkError(null);
         await resolveSessionUser(session?.user ?? null, true);
-        if (isMounted) setIsLoading(false);
+        if (isMounted && initCompleted) setIsLoading(false);
         return;
       }
 
@@ -229,7 +230,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setHasRecoverySession(false);
         setRecoveryEmail(null);
         setUser(null);
-        if (isMounted) setIsLoading(false);
+        if (isMounted && initCompleted) setIsLoading(false);
         return;
       }
 
@@ -241,7 +242,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
 
       await resolveSessionUser(session?.user ?? null, recoveryActive);
-      if (isMounted) setIsLoading(false);
+      if (isMounted && initCompleted) setIsLoading(false);
     });
 
     const initAuth = async () => {
@@ -341,6 +342,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       } catch (err) {
         console.error('Error saat inisialisasi Supabase auth session:', err);
       } finally {
+        initCompleted = true;
         if (isMounted) setIsLoading(false);
       }
     };

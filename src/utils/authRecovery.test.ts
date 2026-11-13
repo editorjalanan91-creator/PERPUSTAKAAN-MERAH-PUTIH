@@ -92,7 +92,15 @@ test('shouldRenderResetPasswordView & shouldShowNewPasswordForm - enforces Condi
     true
   );
 
-  // Link expired -> stays in Condition 1 with error even if stale flag was present
+  // Link expired -> renders ResetPasswordView in Condition 1 with error (even if redirected to /)
+  assert.equal(
+    shouldRenderResetPasswordView({
+      isPasswordRecovery: false,
+      isResetPasswordRoute: false,
+      hasRecoveryError: true,
+    }),
+    true
+  );
   assert.equal(
     shouldShowNewPasswordForm({
       isPasswordRecovery: true,
