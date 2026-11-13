@@ -80,7 +80,7 @@ export const AuthView: React.FC<AuthViewProps> = ({
   };
 
   return (
-    <div className="min-h-screen bg-slate-950 flex flex-col justify-center items-center px-4 py-12 relative overflow-hidden">
+    <div className="min-h-screen bg-slate-950 flex flex-col justify-center items-center px-4 py-8 sm:py-12 relative overflow-hidden">
       {/* Background ambient lighting in Navy & Gold */}
       <div className="absolute top-0 left-1/4 w-96 h-96 bg-blue-900/20 rounded-full blur-3xl pointer-events-none" />
       <div className="absolute bottom-0 right-1/4 w-96 h-96 bg-amber-600/15 rounded-full blur-3xl pointer-events-none" />
@@ -89,17 +89,17 @@ export const AuthView: React.FC<AuthViewProps> = ({
       {/* Main Container */}
       <div className="relative w-full max-w-lg z-10">
         {/* Header Emblem */}
-        <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-20 h-20 rounded-2xl bg-gradient-to-tr from-blue-900 via-slate-900 to-amber-600/40 p-0.5 shadow-2xl shadow-blue-950/80 mb-4 ring-1 ring-amber-400/30">
+        <div className="text-center mb-7">
+          <div className="inline-flex items-center justify-center w-18 h-18 sm:w-20 sm:h-20 rounded-2xl bg-gradient-to-tr from-blue-900 via-slate-900 to-amber-600/40 p-0.5 shadow-2xl shadow-blue-950/80 mb-4 ring-1 ring-amber-400/30">
             <div className="w-full h-full bg-slate-900 rounded-[14px] flex items-center justify-center">
-              <BookOpen className="w-10 h-10 text-amber-400 drop-shadow-[0_2px_8px_rgba(251,191,36,0.5)]" />
+              <BookOpen className="w-9 h-9 sm:w-10 sm:h-10 text-amber-400 drop-shadow-[0_2px_8px_rgba(251,191,36,0.5)]" />
             </div>
           </div>
-          <h1 className="text-3xl font-bold tracking-tight text-white mb-2 font-brand">
+          <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-white mb-2.5 font-brand">
             PERPUSTAKAAN MERAH PUTIH
           </h1>
-          <p className="text-sm text-slate-400 max-w-sm mx-auto">
-            Sistem Informasi Perpustakaan Terpadu dengan Database Supabase. Akses koleksi literatur dan kelola peminjaman secara digital.
+          <p className="text-sm text-slate-300/90 leading-relaxed max-w-md mx-auto">
+            Temukan berbagai koleksi literatur, perluas wawasan, dan nikmati layanan perpustakaan digital dengan mudah.
           </p>
         </div>
 
@@ -255,7 +255,7 @@ export const AuthView: React.FC<AuthViewProps> = ({
                     <button
                       type="submit"
                       disabled={isSubmitting}
-                      className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-amber-500 via-amber-600 to-amber-500 bg-[length:200%_auto] hover:bg-right transition-all duration-300 text-slate-950 font-bold text-sm shadow-lg shadow-amber-500/20 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer flex items-center justify-center gap-2"
+                      className="w-full mt-1 py-3.5 px-4 rounded-xl bg-gradient-to-r from-amber-500 via-amber-600 to-amber-500 bg-[length:200%_auto] hover:bg-right transition-all duration-300 text-slate-950 font-bold text-sm shadow-lg shadow-amber-500/20 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer flex items-center justify-center gap-2"
                     >
                       {isSubmitting ? (
                         <>
@@ -400,8 +400,8 @@ export const AuthView: React.FC<AuthViewProps> = ({
         </div>
 
         {/* Footer info */}
-        <div className="mt-8 text-center text-xs text-slate-500">
-          <p>© 2026 PERPUSTAKAAN MERAH PUTIH • Terintegrasi Supabase Cloud &amp; RLS Security</p>
+        <div className="mt-7 text-center text-xs text-slate-400/90 tracking-wide">
+          <p>© 2026 PERPUSTAKAAN MERAH PUTIH • Layanan Literasi Digital</p>
         </div>
       </div>
     </div>
