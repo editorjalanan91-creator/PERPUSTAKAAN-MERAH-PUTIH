@@ -1,4 +1,5 @@
-import { createClient } from '@supabase/supabase-js';
+import { createClient, type AuthChangeEvent, type Session } from '@supabase/supabase-js';
+import { parseAuthCallbackUrl, type AuthCallbackParseResult } from '../utils/authRecovery';
 
 const rawSupabaseUrl = import.meta.env.VITE_SUPABASE_URL ?? '';
 const rawSupabaseKey =
@@ -36,7 +37,7 @@ export function getSupabaseConfigError(): string | null {
   if (!supabaseUrl) {
     return 'Konfigurasi VITE_SUPABASE_URL belum diatur. Tambahkan pada Environment Variables (Vercel / .env) lalu build ulang aplikasi.';
   }
-  if (!isSupabaseUrlValid) {
+  if (!supabaseUrlValidSafe(supabaseUrl)) {
     return 'Format VITE_SUPABASE_URL tidak valid. Pastikan menggunakan URL project Supabase yang benar (contoh: https://xxxx.supabase.co) tanpa tanda kutip.';
   }
   if (!supabasePublishableKey || !isSupabaseKeyValid) {
@@ -45,11 +46,82 @@ export function getSupabaseConfigError(): string | null {
   return null;
 }
 
+function supabaseUrlValidSafe(url: string): boolean {
+  return (
+    /^https?:\/\/[a-z0-9.-]+(:\d+)?(\/.*)?$/i.test(url) &&
+    !url.includes('your-project-ref') &&
+    !url.includes('placeholder')
+  );
+}
+
 if (!isSupabaseConfigured) {
   console.warn(
     '[PERPUSTAKAAN MERAH PUTIH] Konfigurasi Supabase belum lengkap:',
     getSupabaseConfigError()
   );
+}
+
+/**
+ * Snapshot URL callback secara sinkron SEBELUM createClient() berjalan,
+ * karena GoTrueClient akan langsung membersihkan window.location.hash saat inisialisasi.
+ */
+export const initialAuthCallback: AuthCallbackParseResult =
+  typeof window !== 'undefined'
+    ? parseAuthCallbackUrl(window.location.href)
+    : parseAuthCallbackUrl('/');
+
+const RECOVERY_STORAGE_KEY = 'pmp_password_recovery_active';
+
+function readStoredRecoveryFlag(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    return window.sessionStorage.getItem(RECOVERY_STORAGE_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+let passwordRecoveryActive = false;
+
+if (initialAuthCallback.hasAuthError) {
+  passwordRecoveryActive = false;
+  if (typeof window !== 'undefined') {
+    try {
+      window.sessionStorage.removeItem(RECOVERY_STORAGE_KEY);
+    } catch {
+      // ignore
+    }
+  }
+} else if (initialAuthCallback.isImplicitRecovery || initialAuthCallback.isOtpRecovery) {
+  passwordRecoveryActive = true;
+  if (typeof window !== 'undefined') {
+    try {
+      window.sessionStorage.setItem(RECOVERY_STORAGE_KEY, '1');
+    } catch {
+      // ignore
+    }
+  }
+} else {
+  passwordRecoveryActive = readStoredRecoveryFlag();
+}
+
+export function setPasswordRecoveryFlag(active: boolean): void {
+  passwordRecoveryActive = active;
+  if (typeof window !== 'undefined') {
+    try {
+      if (active) {
+        window.sessionStorage.setItem(RECOVERY_STORAGE_KEY, '1');
+      } else {
+        window.sessionStorage.removeItem(RECOVERY_STORAGE_KEY);
+      }
+    } catch {
+      // ignore
+    }
+  }
+}
+
+export function isPasswordRecoveryActive(): boolean {
+  return passwordRecoveryActive || readStoredRecoveryFlag();
 }
 
 export const supabase = createClient(
@@ -63,6 +135,36 @@ export const supabase = createClient(
     },
   }
 );
+
+type AuthEventSubscriber = (event: AuthChangeEvent, session: Session | null) => void | Promise<void>;
+const authEventSubscribers = new Set<AuthEventSubscriber>();
+
+/**
+ * Satu listener onAuthStateChange tunggal di level modul agar event PASSWORD_RECOVERY
+ * selalu tertangkap sejak detik pertama inisialisasi client tanpa duplikasi listener.
+ */
+supabase.auth.onAuthStateChange(async (event, session) => {
+  if (event === 'PASSWORD_RECOVERY') {
+    setPasswordRecoveryFlag(true);
+  } else if (event === 'SIGNED_OUT') {
+    setPasswordRecoveryFlag(false);
+  }
+
+  for (const subscriber of authEventSubscribers) {
+    try {
+      await subscriber(event, session);
+    } catch (err) {
+      console.error('Error pada subscriber auth state:', err);
+    }
+  }
+});
+
+export function subscribeToAuthEvents(subscriber: AuthEventSubscriber): () => void {
+  authEventSubscribers.add(subscriber);
+  return () => {
+    authEventSubscribers.delete(subscriber);
+  };
+}
 
 /**
  * Storage Bucket Constants

@@ -18,6 +18,7 @@ import { AdminCategoriesView } from './views/admin/AdminCategoriesView';
 import { AdminLoansView } from './views/admin/AdminLoansView';
 import { AdminUsersView } from './views/admin/AdminUsersView';
 import { AdminReportsView } from './views/admin/AdminReportsView';
+import { shouldRenderResetPasswordView } from './utils/authRecovery';
 
 function LibraryApp() {
   const { user, profile, isLoading, isAdmin, isPasswordRecovery, clearPasswordRecovery, showToast } = useAuth();
@@ -33,6 +34,14 @@ function LibraryApp() {
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
   }, []);
+
+  // Jika Supabase mengarahkan callback recovery ke root (/), sinkronkan path ke /reset-password setelah inisialisasi selesai
+  useEffect(() => {
+    if (!isLoading && isPasswordRecovery && typeof window !== 'undefined' && window.location.pathname !== '/reset-password') {
+      window.history.replaceState({}, '', '/reset-password');
+      setIsResetPasswordRoute(true);
+    }
+  }, [isLoading, isPasswordRecovery]);
 
   const navigateToResetPassword = () => {
     if (typeof window !== 'undefined' && window.location.pathname !== '/reset-password') {
@@ -274,7 +283,7 @@ function LibraryApp() {
   }
 
   // PASSWORD RECOVERY & /reset-password ROUTE
-  if (isPasswordRecovery || isResetPasswordRoute) {
+  if (shouldRenderResetPasswordView({ isPasswordRecovery, isResetPasswordRoute })) {
     return (
       <>
         <ResetPasswordView onBackToLogin={handleBackToLogin} />

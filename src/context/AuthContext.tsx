@@ -6,7 +6,12 @@ import {
   RESET_PASSWORD_REDIRECT_URL,
   getSupabaseConfigError,
   recordActivityLog,
+  initialAuthCallback,
+  isPasswordRecoveryActive,
+  setPasswordRecoveryFlag,
+  subscribeToAuthEvents,
 } from '../services/supabaseClient';
+import { formatRecoveryUrlError } from '../utils/authRecovery';
 import { validateRegistration } from '../utils/libraryRules';
 
 export interface ToastMessage {
@@ -23,6 +28,10 @@ interface AuthContextType {
   isAdmin: boolean;
   isUser: boolean;
   isPasswordRecovery: boolean;
+  hasRecoverySession: boolean;
+  recoveryEmail: string | null;
+  recoveryLinkError: string | null;
+  clearRecoveryLinkError: () => void;
   login: (identifier: string, password: string) => Promise<User>;
   register: (payload: {
     fullName: string;
@@ -46,16 +55,6 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 const VALID_ROLES: UserRole[] = ['admin', 'visitor', 'user'];
-
-function hasRecoveryParamsInUrl(): boolean {
-  if (typeof window === 'undefined') return false;
-  const hash = window.location.hash || '';
-  const search = window.location.search || '';
-  return (
-    hash.includes('type=recovery') ||
-    search.includes('type=recovery')
-  );
-}
 
 function formatSupabaseAuthError(rawMessage: string): string {
   const msg = (rawMessage || '').trim();
@@ -109,14 +108,25 @@ function formatSupabaseAuthError(rawMessage: string): string {
     return 'Sesi pemulihan password tidak ditemukan atau sudah kedaluwarsa. Silakan ajukan tautan pemulihan password baru.';
   }
 
+  if (lower.includes('expired') || lower.includes('otp_expired') || lower.includes('token has expired')) {
+    return 'Tautan pemulihan password sudah kedaluwarsa atau pernah digunakan. Silakan ajukan tautan pemulihan baru.';
+  }
+
   return msg || 'Terjadi kesalahan pada layanan autentikasi Supabase.';
 }
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
-  const [isPasswordRecovery, setIsPasswordRecovery] = useState<boolean>(() => hasRecoveryParamsInUrl());
+  const [isPasswordRecovery, setIsPasswordRecovery] = useState<boolean>(() => isPasswordRecoveryActive());
+  const [hasRecoverySession, setHasRecoverySession] = useState<boolean>(false);
+  const [recoveryEmail, setRecoveryEmail] = useState<string | null>(null);
+  const [recoveryLinkError, setRecoveryLinkError] = useState<string | null>(() =>
+    formatRecoveryUrlError(initialAuthCallback)
+  );
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
+
+  const clearRecoveryLinkError = () => setRecoveryLinkError(null);
 
   const showToast = (message: string, type: 'success' | 'error' | 'info' = 'success', title?: string) => {
     const id = `toast_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
@@ -170,13 +180,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
-  // Bootstrap & Listen to Supabase Auth State Changes (termasuk PASSWORD_RECOVERY)
+  // Bootstrap & Dengarkan perubahan state auth Supabase (termasuk PASSWORD_RECOVERY)
   useEffect(() => {
     let isMounted = true;
-    const initialRecoveryUrl = hasRecoveryParamsInUrl();
 
     const resolveSessionUser = async (
-      authUser: { id: string; email?: string | null; email_confirmed_at?: string | null } | null
+      authUser: { id: string; email?: string | null; email_confirmed_at?: string | null } | null,
+      inRecoveryFlow: boolean
     ) => {
       if (!authUser) {
         if (isMounted) setUser(null);
@@ -189,8 +199,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         return;
       }
 
-      // Pengunjung wajib sudah memverifikasi email
-      if (profile.role !== 'admin' && !authUser.email_confirmed_at) {
+      // Pengunjung wajib sudah memverifikasi email (jangan batalkan sesi saat proses recovery)
+      if (!inRecoveryFlow && profile.role !== 'admin' && !authUser.email_confirmed_at) {
         await supabase.auth.signOut().catch(() => undefined);
         if (isMounted) setUser(null);
         return;
@@ -199,17 +209,135 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (isMounted) setUser(profile);
     };
 
+    const unsubscribe = subscribeToAuthEvents(async (event, session) => {
+      if (!isMounted) return;
+
+      if (event === 'PASSWORD_RECOVERY') {
+        setPasswordRecoveryFlag(true);
+        setIsPasswordRecovery(true);
+        setHasRecoverySession(Boolean(session?.user));
+        setRecoveryEmail(session?.user?.email ?? null);
+        setRecoveryLinkError(null);
+        await resolveSessionUser(session?.user ?? null, true);
+        if (isMounted) setIsLoading(false);
+        return;
+      }
+
+      if (event === 'SIGNED_OUT') {
+        setPasswordRecoveryFlag(false);
+        setIsPasswordRecovery(false);
+        setHasRecoverySession(false);
+        setRecoveryEmail(null);
+        setUser(null);
+        if (isMounted) setIsLoading(false);
+        return;
+      }
+
+      const recoveryActive = isPasswordRecoveryActive();
+      if (recoveryActive && session?.user) {
+        setIsPasswordRecovery(true);
+        setHasRecoverySession(true);
+        setRecoveryEmail(session.user.email ?? null);
+      }
+
+      await resolveSessionUser(session?.user ?? null, recoveryActive);
+      if (isMounted) setIsLoading(false);
+    });
+
     const initAuth = async () => {
       try {
         if (getSupabaseConfigError()) {
           if (isMounted) setUser(null);
           return;
         }
-        const { data: { session } } = await supabase.auth.getSession();
-        if (initialRecoveryUrl && session?.user && isMounted) {
-          setIsPasswordRecovery(true);
+
+        // Tangani link recovery berbasis token_hash (jika template email mengirim ?token_hash=...&type=recovery)
+        if (initialAuthCallback.isOtpRecovery && initialAuthCallback.tokenHash) {
+          const { data: otpData, error: otpError } = await supabase.auth.verifyOtp({
+            token_hash: initialAuthCallback.tokenHash,
+            type: 'recovery',
+          });
+
+          // Bersihkan parameter token_hash dari URL setelah diverifikasi tanpa memicu reload
+          if (typeof window !== 'undefined') {
+            const cleanedUrl = new URL(window.location.href);
+            cleanedUrl.searchParams.delete('token_hash');
+            cleanedUrl.searchParams.delete('token');
+            cleanedUrl.searchParams.delete('type');
+            window.history.replaceState({}, '', `${cleanedUrl.pathname}${cleanedUrl.search}`);
+          }
+
+          if (otpError || !otpData.session?.user) {
+            setPasswordRecoveryFlag(false);
+            if (isMounted) {
+              setIsPasswordRecovery(false);
+              setHasRecoverySession(false);
+              setRecoveryEmail(null);
+              setRecoveryLinkError(
+                formatSupabaseAuthError(
+                  otpError?.message ||
+                    'Tautan pemulihan password tidak valid atau sudah kedaluwarsa.'
+                )
+              );
+            }
+            return;
+          }
+
+          setPasswordRecoveryFlag(true);
+          if (isMounted) {
+            setIsPasswordRecovery(true);
+            setHasRecoverySession(true);
+            setRecoveryEmail(otpData.session.user.email ?? null);
+            setRecoveryLinkError(null);
+          }
+          await resolveSessionUser(otpData.session.user, true);
+          return;
         }
-        await resolveSessionUser(session?.user ?? null);
+
+        const {
+          data: { session },
+        } = await supabase.auth.getSession();
+
+        if (!isMounted) return;
+
+        if (initialAuthCallback.hasAuthError) {
+          setPasswordRecoveryFlag(false);
+          setIsPasswordRecovery(false);
+          setHasRecoverySession(false);
+          setRecoveryEmail(null);
+          setRecoveryLinkError(formatRecoveryUrlError(initialAuthCallback));
+          await resolveSessionUser(session?.user ?? null, false);
+          return;
+        }
+
+        const recoveryActive = isPasswordRecoveryActive() || initialAuthCallback.isImplicitRecovery;
+
+        if (recoveryActive && session?.user) {
+          setPasswordRecoveryFlag(true);
+          setIsPasswordRecovery(true);
+          setHasRecoverySession(true);
+          setRecoveryEmail(session.user.email ?? null);
+          setRecoveryLinkError(null);
+          await resolveSessionUser(session.user, true);
+        } else if (initialAuthCallback.hasRecoveryIntent && !session?.user) {
+          // URL membawa parameter recovery namun Supabase gagal membentuk sesi (kedaluwarsa / sudah dipakai)
+          setPasswordRecoveryFlag(false);
+          setIsPasswordRecovery(false);
+          setHasRecoverySession(false);
+          setRecoveryEmail(null);
+          setRecoveryLinkError(
+            'Tautan pemulihan password sudah kedaluwarsa atau pernah digunakan. Silakan ajukan tautan pemulihan baru.'
+          );
+          await resolveSessionUser(null, false);
+        } else {
+          if (!session?.user) {
+            setPasswordRecoveryFlag(false);
+            setIsPasswordRecovery(false);
+            setHasRecoverySession(false);
+            setRecoveryEmail(null);
+          }
+          await resolveSessionUser(session?.user ?? null, false);
+        }
       } catch (err) {
         console.error('Error saat inisialisasi Supabase auth session:', err);
       } finally {
@@ -219,17 +347,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     initAuth();
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
-      if (event === 'PASSWORD_RECOVERY') {
-        if (isMounted) setIsPasswordRecovery(true);
-      }
-      await resolveSessionUser(session?.user ?? null);
-      if (isMounted) setIsLoading(false);
-    });
-
     return () => {
       isMounted = false;
-      subscription.unsubscribe();
+      unsubscribe();
     };
   }, []);
 
@@ -287,7 +407,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       throw new Error('Email Anda belum diverifikasi. Harap buka tautan verifikasi yang dikirimkan ke email Anda terlebih dahulu.');
     }
 
+    setPasswordRecoveryFlag(false);
     setIsPasswordRecovery(false);
+    setHasRecoverySession(false);
+    setRecoveryEmail(null);
     setUser(profile);
 
     // Catat log aktivitas login
@@ -447,7 +570,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       throw new Error(configErr);
     }
 
-    if (!newPassword || newPassword.length < 6) {
+    if (!newPassword || newPassword.trim().length === 0 || newPassword.length < 6) {
       throw new Error('Kata sandi baru minimal harus 6 karakter.');
     }
 
@@ -477,6 +600,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
 
     // Keluarkan sesi sementara agar pengguna dapat masuk kembali dengan kata sandi baru secara eksplisit
+    setPasswordRecoveryFlag(false);
+    setIsPasswordRecovery(false);
+    setHasRecoverySession(false);
+    setRecoveryEmail(null);
     await supabase.auth.signOut().catch(() => undefined);
     setUser(null);
 
@@ -488,7 +615,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const clearPasswordRecovery = async () => {
+    const wasInRecovery = isPasswordRecovery || hasRecoverySession || isPasswordRecoveryActive();
+    setPasswordRecoveryFlag(false);
     setIsPasswordRecovery(false);
+    setHasRecoverySession(false);
+    setRecoveryEmail(null);
+    setRecoveryLinkError(null);
+    if (wasInRecovery) {
+      await supabase.auth.signOut().catch(() => undefined);
+      setUser(null);
+    }
     if (typeof window !== 'undefined' && window.location.pathname === '/reset-password') {
       window.history.replaceState({}, '', '/');
     }
@@ -506,7 +642,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     } catch (err) {
       console.warn('Error saat logout:', err);
     } finally {
+      setPasswordRecoveryFlag(false);
       setIsPasswordRecovery(false);
+      setHasRecoverySession(false);
+      setRecoveryEmail(null);
       setUser(null);
       showToast('Anda telah keluar dari sistem.', 'info');
     }
@@ -571,6 +710,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         isAdmin,
         isUser,
         isPasswordRecovery,
+        hasRecoverySession,
+        recoveryEmail,
+        recoveryLinkError,
+        clearRecoveryLinkError,
         login,
         register,
         requestPasswordReset,

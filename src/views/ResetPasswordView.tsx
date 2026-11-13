@@ -1,6 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import {
+  shouldShowNewPasswordForm,
+  validateNewPasswordInput,
+} from '../utils/authRecovery';
+import {
   BookOpen,
   Lock,
   Eye,
@@ -17,60 +21,64 @@ interface ResetPasswordViewProps {
   onBackToLogin: () => void;
 }
 
-function parseUrlAuthError(): string | null {
-  if (typeof window === 'undefined') return null;
-
-  const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ''));
-  const searchParams = new URLSearchParams(window.location.search);
-
-  const errorCode = hashParams.get('error_code') || searchParams.get('error_code');
-  const errorDesc = hashParams.get('error_description') || searchParams.get('error_description');
-
-  if (!errorCode && !errorDesc) return null;
-
-  if (errorCode === 'otp_expired' || (errorDesc || '').toLowerCase().includes('expired')) {
-    return 'Tautan pemulihan password sudah kedaluwarsa atau pernah digunakan. Silakan ajukan tautan pemulihan baru di bawah ini.';
-  }
-
-  return errorDesc ? decodeURIComponent(errorDesc.replace(/\+/g, ' ')) : 'Tautan pemulihan password tidak valid.';
-}
-
 export const ResetPasswordView: React.FC<ResetPasswordViewProps> = ({ onBackToLogin }) => {
-  const { isPasswordRecovery, user, confirmPasswordReset, requestPasswordReset } = useAuth();
+  const {
+    isPasswordRecovery,
+    hasRecoverySession,
+    recoveryEmail,
+    recoveryLinkError,
+    clearRecoveryLinkError,
+    user,
+    confirmPasswordReset,
+    requestPasswordReset,
+  } = useAuth();
 
-  // Form update password baru (saat event PASSWORD_RECOVERY aktif)
+  // Form update password baru (Kondisi 2: saat event PASSWORD_RECOVERY aktif)
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
 
-  // Form kirim ulang email pemulihan (jika user membuka /reset-password tanpa sesi recovery aktif)
+  // Form kirim tautan pemulihan (Kondisi 1: belum ada sesi recovery)
   const [recoveryIdentifier, setRecoveryIdentifier] = useState('');
   const [sentToEmail, setSentToEmail] = useState<string | null>(null);
 
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [errorMessage, setErrorMessage] = useState<string | null>(() => parseUrlAuthError());
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isPasswordUpdated, setIsPasswordUpdated] = useState(false);
 
-  const hasActiveRecoverySession = isPasswordRecovery || !!user;
+  const displayedError = errorMessage || recoveryLinkError;
+  const activeEmail = recoveryEmail || user?.email || null;
+
+  const hasActiveRecoveryForm = shouldShowNewPasswordForm({
+    isPasswordRecovery,
+    hasRecoverySession,
+    hasUrlError: Boolean(recoveryLinkError),
+  });
 
   useEffect(() => {
-    // Jika error link berasal dari URL, bersihkan hash error setelah dibaca agar URL rapi
+    // Bersihkan hash error dari URL setelah dibaca oleh AuthContext agar URL bersih
     if (typeof window !== 'undefined' && window.location.hash.includes('error=')) {
       window.history.replaceState({}, '', window.location.pathname);
     }
   }, []);
 
+  // Setelah password berhasil diperbarui, arahkan pengguna ke halaman login secara otomatis
+  useEffect(() => {
+    if (!isPasswordUpdated) return;
+    const timer = window.setTimeout(() => {
+      onBackToLogin();
+    }, 2500);
+    return () => window.clearTimeout(timer);
+  }, [isPasswordUpdated, onBackToLogin]);
+
   const handleUpdatePasswordSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
+    clearRecoveryLinkError();
 
-    if (newPassword.length < 6) {
-      setErrorMessage('Kata sandi baru minimal harus 6 karakter.');
-      return;
-    }
-
-    if (newPassword !== confirmPassword) {
-      setErrorMessage('Konfirmasi kata sandi tidak cocok.');
+    const validation = validateNewPasswordInput(newPassword, confirmPassword);
+    if (!validation.valid) {
+      setErrorMessage(validation.error || 'Password baru tidak valid.');
       return;
     }
 
@@ -90,6 +98,7 @@ export const ResetPasswordView: React.FC<ResetPasswordViewProps> = ({ onBackToLo
   const handleRequestResetSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
+    clearRecoveryLinkError();
 
     if (!recoveryIdentifier.trim()) {
       setErrorMessage('Masukkan username Admin atau alamat email terdaftar.');
@@ -134,7 +143,7 @@ export const ResetPasswordView: React.FC<ResetPasswordViewProps> = ({ onBackToLo
         <div className="bg-slate-900/90 backdrop-blur-xl border border-slate-800 rounded-2xl shadow-2xl shadow-black/60 overflow-hidden ring-1 ring-slate-700/50">
           {isPasswordUpdated ? (
             /* Layar Berhasil Reset Password */
-            <div className="p-8 text-center space-y-5">
+            <div key="reset-success" className="p-8 text-center space-y-5">
               <div className="w-16 h-16 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 flex items-center justify-center mx-auto">
                 <CheckCircle2 className="w-9 h-9" />
               </div>
@@ -144,7 +153,7 @@ export const ResetPasswordView: React.FC<ResetPasswordViewProps> = ({ onBackToLo
                   Password Berhasil Diperbarui
                 </h2>
                 <p className="text-xs text-slate-300 leading-relaxed max-w-sm mx-auto">
-                  Kata sandi akun Anda telah diperbarui dengan aman. Silakan masuk kembali untuk melanjutkan aktivitas Anda.
+                  Kata sandi akun Anda telah diperbarui dengan aman. Mengalihkan ke halaman masuk...
                 </p>
               </div>
 
@@ -164,9 +173,9 @@ export const ResetPasswordView: React.FC<ResetPasswordViewProps> = ({ onBackToLo
                 <span>Masuk ke Halaman Login</span>
               </button>
             </div>
-          ) : hasActiveRecoverySession ? (
-            /* Form Buat Password Baru (Event PASSWORD_RECOVERY) */
-            <div className="p-6 sm:p-8 space-y-5">
+          ) : hasActiveRecoveryForm ? (
+            /* Kondisi 2: Form Buat Password Baru (Event PASSWORD_RECOVERY) */
+            <div key="reset-new-password" className="p-6 sm:p-8 space-y-5">
               <div className="flex items-center gap-3 pb-4 border-b border-slate-800">
                 <div className="w-10 h-10 rounded-xl bg-blue-950 border border-amber-500/30 flex items-center justify-center text-amber-400 shrink-0">
                   <KeyRound className="w-5 h-5" />
@@ -174,23 +183,29 @@ export const ResetPasswordView: React.FC<ResetPasswordViewProps> = ({ onBackToLo
                 <div>
                   <h2 className="text-base font-bold text-white">Tetapkan Kata Sandi Baru</h2>
                   <p className="text-xs text-slate-400">
-                    {user?.email
-                      ? `Pemulihan untuk akun: ${user.email}`
+                    {activeEmail
+                      ? `Pemulihan untuk akun: ${activeEmail}`
                       : 'Masukkan kata sandi baru untuk akun Anda.'}
                   </p>
                 </div>
               </div>
 
-              {errorMessage && (
-                <div className="p-4 rounded-xl bg-rose-950/70 border border-rose-800/80 text-rose-200 text-sm flex items-start gap-3">
+              {displayedError && (
+                <div
+                  role="alert"
+                  className="p-4 rounded-xl bg-rose-950/70 border border-rose-800/80 text-rose-200 text-sm flex items-start gap-3"
+                >
                   <span className="shrink-0 mt-0.5 font-bold">⚠️</span>
-                  <div className="flex-1">{errorMessage}</div>
+                  <div className="flex-1">{displayedError}</div>
                 </div>
               )}
 
               <form onSubmit={handleUpdatePasswordSubmit} className="space-y-4">
                 <div>
-                  <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">
+                  <label
+                    htmlFor="reset-new-password"
+                    className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5"
+                  >
                     Password Baru
                   </label>
                   <div className="relative">
@@ -198,6 +213,7 @@ export const ResetPasswordView: React.FC<ResetPasswordViewProps> = ({ onBackToLo
                       <Lock className="w-4 h-4" />
                     </div>
                     <input
+                      id="reset-new-password"
                       type={showPassword ? 'text' : 'password'}
                       required
                       minLength={6}
@@ -209,6 +225,7 @@ export const ResetPasswordView: React.FC<ResetPasswordViewProps> = ({ onBackToLo
                     <button
                       type="button"
                       onClick={() => setShowPassword(!showPassword)}
+                      aria-label={showPassword ? 'Sembunyikan password' : 'Tampilkan password'}
                       className="absolute inset-y-0 right-0 pr-3.5 flex items-center text-slate-400 hover:text-slate-200 cursor-pointer"
                     >
                       {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
@@ -217,14 +234,18 @@ export const ResetPasswordView: React.FC<ResetPasswordViewProps> = ({ onBackToLo
                 </div>
 
                 <div>
-                  <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">
-                    Konfirmasi Password Baru
+                  <label
+                    htmlFor="reset-confirm-password"
+                    className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5"
+                  >
+                    Konfirmasi Password
                   </label>
                   <div className="relative">
                     <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
                       <Lock className="w-4 h-4" />
                     </div>
                     <input
+                      id="reset-confirm-password"
                       type={showPassword ? 'text' : 'password'}
                       required
                       minLength={6}
@@ -244,12 +265,12 @@ export const ResetPasswordView: React.FC<ResetPasswordViewProps> = ({ onBackToLo
                   {isSubmitting ? (
                     <>
                       <div className="w-4 h-4 border-2 border-slate-950 border-t-transparent rounded-full animate-spin" />
-                      <span>Menyimpan Password Baru...</span>
+                      <span>Menyimpan Password...</span>
                     </>
                   ) : (
                     <>
                       <CheckCircle2 className="w-4 h-4" />
-                      <span>Simpan Password Baru</span>
+                      <span>Simpan Password</span>
                     </>
                   )}
                 </button>
@@ -266,7 +287,7 @@ export const ResetPasswordView: React.FC<ResetPasswordViewProps> = ({ onBackToLo
             </div>
           ) : sentToEmail ? (
             /* Notifikasi Email Reset Terkirim */
-            <div className="p-8 text-center space-y-5">
+            <div key="reset-email-sent" className="p-8 text-center space-y-5">
               <div className="w-16 h-16 rounded-2xl bg-blue-500/10 border border-blue-500/30 text-amber-400 flex items-center justify-center mx-auto">
                 <Mail className="w-9 h-9" />
               </div>
@@ -302,8 +323,8 @@ export const ResetPasswordView: React.FC<ResetPasswordViewProps> = ({ onBackToLo
               </button>
             </div>
           ) : (
-            /* Form Kirim Tautan Reset Password (jika dibuka tanpa token recovery) */
-            <div className="p-6 sm:p-8 space-y-5">
+            /* Kondisi 1: Form Kirim Tautan Reset Password (jika dibuka tanpa sesi recovery aktif) */
+            <div key="reset-request-form" className="p-6 sm:p-8 space-y-5">
               <div className="flex items-center gap-3 pb-4 border-b border-slate-800">
                 <div className="w-10 h-10 rounded-xl bg-blue-950 border border-amber-500/30 flex items-center justify-center text-amber-400 shrink-0">
                   <KeyRound className="w-5 h-5" />
@@ -316,16 +337,22 @@ export const ResetPasswordView: React.FC<ResetPasswordViewProps> = ({ onBackToLo
                 </div>
               </div>
 
-              {errorMessage && (
-                <div className="p-4 rounded-xl bg-rose-950/70 border border-rose-800/80 text-rose-200 text-sm flex items-start gap-3">
+              {displayedError && (
+                <div
+                  role="alert"
+                  className="p-4 rounded-xl bg-rose-950/70 border border-rose-800/80 text-rose-200 text-sm flex items-start gap-3"
+                >
                   <span className="shrink-0 mt-0.5 font-bold">⚠️</span>
-                  <div className="flex-1">{errorMessage}</div>
+                  <div className="flex-1">{displayedError}</div>
                 </div>
               )}
 
               <form onSubmit={handleRequestResetSubmit} className="space-y-5">
                 <div>
-                  <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2">
+                  <label
+                    htmlFor="recovery-identifier"
+                    className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2"
+                  >
                     Username Admin atau Email Terdaftar
                   </label>
                   <div className="relative">
@@ -333,6 +360,7 @@ export const ResetPasswordView: React.FC<ResetPasswordViewProps> = ({ onBackToLo
                       <Mail className="w-4 h-4" />
                     </div>
                     <input
+                      id="recovery-identifier"
                       type="text"
                       required
                       value={recoveryIdentifier}
