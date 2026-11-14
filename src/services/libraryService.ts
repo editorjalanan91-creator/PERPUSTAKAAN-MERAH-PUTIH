@@ -476,10 +476,10 @@ export const libraryService = {
   },
 
   // ==========================================
-  // PENGUNJUNG (profiles)
+  // PENGUNJUNG (profiles & server admin API)
   // ==========================================
   async getVisitors(): Promise<Profile[]> {
-    const { data, error } = await supabase
+    const { data: profilesData, error } = await supabase
       .from('profiles')
       .select('*')
       .neq('role', 'admin')
@@ -490,20 +490,101 @@ export const libraryService = {
       throw error;
     }
 
-    return data || [];
+    const baseVisitors: Profile[] = profilesData || [];
+
+    // Coba perkaya data dengan email & status arsip dari endpoint admin server-side
+    try {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+
+      if (session?.access_token) {
+        const res = await fetch('/api/admin/visitors', {
+          method: 'GET',
+          headers: {
+            Authorization: `Bearer ${session.access_token}`,
+          },
+        });
+        if (res.ok) {
+          const payload = await res.json();
+          if (Array.isArray(payload?.visitors)) {
+            return payload.visitors;
+          }
+        }
+      }
+    } catch {
+      // Fallback ke data public.profiles apabila endpoint admin tidak tersedia
+    }
+
+    return baseVisitors;
   },
 
-  async deleteVisitor(id: string, adminId?: string): Promise<boolean> {
-    const { error } = await supabase
-      .from('profiles')
-      .delete()
-      .eq('id', id);
+  async deleteVisitor(id: string): Promise<{ mode: 'deleted'; message: string }> {
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
 
-    if (error) throw error;
-    if (adminId) {
-      await recordActivityLog(adminId, 'delete_visitor', 'profiles', id);
+    if (!session?.access_token) {
+      throw new Error('Sesi administrator tidak ditemukan. Silakan login kembali.');
     }
-    return true;
+
+    const response = await fetch(`/api/admin/visitors/${encodeURIComponent(id)}/delete`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${session.access_token}`,
+      },
+    });
+
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const err: any = new Error(
+        payload?.error || `Gagal menghapus akun pengunjung (HTTP ${response.status}).`
+      );
+      err.code = payload?.code;
+      err.totalLoans = payload?.totalLoans;
+      err.status = response.status;
+      throw err;
+    }
+
+    return {
+      mode: 'deleted',
+      message: payload?.message || 'Akun pengunjung berhasil dihapus permanen.',
+    };
+  },
+
+  async archiveVisitor(id: string): Promise<{ mode: 'archived'; archivedAt?: string; message: string }> {
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
+
+    if (!session?.access_token) {
+      throw new Error('Sesi administrator tidak ditemukan. Silakan login kembali.');
+    }
+
+    const response = await fetch(`/api/admin/visitors/${encodeURIComponent(id)}/archive`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${session.access_token}`,
+      },
+    });
+
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const err: any = new Error(
+        payload?.error || `Gagal mengarsipkan akun pengunjung (HTTP ${response.status}).`
+      );
+      err.code = payload?.code;
+      err.status = response.status;
+      throw err;
+    }
+
+    return {
+      mode: 'archived',
+      archivedAt: payload?.archivedAt,
+      message: payload?.message || 'Akun pengunjung berhasil diarsipkan dan dinonaktifkan.',
+    };
   },
 
   // ==========================================

@@ -89,6 +89,10 @@ function formatSupabaseAuthError(rawMessage: string): string {
     return 'Username / email atau kata sandi tidak sesuai.';
   }
 
+  if (lower.includes('user is banned') || lower.includes('banned')) {
+    return 'Akun pengunjung ini telah dinonaktifkan / diarsipkan oleh administrator perpustakaan.';
+  }
+
   if (lower.includes('unable to validate email address') || lower.includes('invalid email')) {
     return 'Format alamat email tidak valid.';
   }
@@ -169,6 +173,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         fullName: profile.full_name || 'Pengguna Perpustakaan',
         username: profile.username || authEmail.split('@')[0],
         role: profile.role as UserRole,
+        is_active: profile.is_active,
+        archived_at: profile.archived_at ?? null,
         created_at: profile.created_at,
         createdAt: profile.created_at,
         updated_at: profile.updated_at,
@@ -186,7 +192,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     let initCompleted = false;
 
     const resolveSessionUser = async (
-      authUser: { id: string; email?: string | null; email_confirmed_at?: string | null } | null,
+      authUser: {
+        id: string;
+        email?: string | null;
+        email_confirmed_at?: string | null;
+        user_metadata?: Record<string, any>;
+      } | null,
       inRecoveryFlow: boolean
     ) => {
       if (!authUser) {
@@ -196,6 +207,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       const profile = await fetchUserProfile(authUser.id, authUser.email || '');
       if (!profile) {
+        if (isMounted) setUser(null);
+        return;
+      }
+
+      const isArchivedAccount =
+        profile.is_active === false ||
+        Boolean(profile.archived_at) ||
+        authUser.user_metadata?.is_active === false;
+
+      if (!inRecoveryFlow && isArchivedAccount && profile.role !== 'admin') {
+        await supabase.auth.signOut().catch(() => undefined);
         if (isMounted) setUser(null);
         return;
       }
@@ -401,6 +423,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (!profile) {
       await supabase.auth.signOut().catch(() => undefined);
       throw new Error('Profil pengguna tidak ditemukan di database atau tidak memiliki role yang sah.');
+    }
+
+    if (
+      profile.role !== 'admin' &&
+      (profile.is_active === false ||
+        Boolean(profile.archived_at) ||
+        data.user.user_metadata?.is_active === false)
+    ) {
+      await supabase.auth.signOut().catch(() => undefined);
+      throw new Error('Akun pengunjung ini telah dinonaktifkan / diarsipkan oleh administrator perpustakaan.');
     }
 
     // Pengunjung wajib terverifikasi sebelum masuk

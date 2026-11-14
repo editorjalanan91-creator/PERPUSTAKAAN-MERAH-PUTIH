@@ -276,11 +276,42 @@ function LibraryApp() {
 
   const handleDeleteVisitor = async (id: string) => {
     try {
-      await libraryService.deleteVisitor(id, user?.id);
-      showToast('Data profil pengunjung berhasil dihapus.', 'success', 'Profil Dihapus');
+      const result = await libraryService.deleteVisitor(id);
+      setVisitors((prev) => prev.filter((v) => v.id !== id));
+      showToast(
+        result.message || 'Akun pengunjung berhasil dihapus dari sistem.',
+        'success',
+        'Akun Pengunjung Dihapus'
+      );
       await loadData(false);
     } catch (err: any) {
-      showToast(err?.message || 'Gagal menghapus profil pengunjung.', 'error');
+      showToast(err?.message || 'Gagal menghapus akun pengunjung.', 'error');
+      throw err;
+    }
+  };
+
+  const handleArchiveVisitor = async (id: string) => {
+    try {
+      const result = await libraryService.archiveVisitor(id);
+      setVisitors((prev) =>
+        prev.map((v) =>
+          v.id === id
+            ? {
+                ...v,
+                is_active: false,
+                archived_at: result.archivedAt || new Date().toISOString(),
+              }
+            : v
+        )
+      );
+      showToast(
+        result.message || 'Akun pengunjung berhasil diarsipkan dan dinonaktifkan.',
+        'success',
+        'Akun Pengunjung Diarsipkan'
+      );
+      await loadData(false);
+    } catch (err: any) {
+      showToast(err?.message || 'Gagal mengarsipkan akun pengunjung.', 'error');
       throw err;
     }
   };
@@ -388,7 +419,9 @@ function LibraryApp() {
                   (l) => l.user_id === v.id && (l.status === 'pending' || l.status === 'approved' || l.status === 'borrowed')
                 ).length,
               }))}
+              currentUserId={user.id}
               onDeleteUser={handleDeleteVisitor}
+              onArchiveUser={handleArchiveVisitor}
             />
           )}
 

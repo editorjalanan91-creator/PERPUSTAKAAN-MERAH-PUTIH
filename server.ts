@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import express, { Request, Response } from 'express';
 import fs from 'node:fs';
 import path from 'node:path';

@@ -1,6 +1,7 @@
 import React from 'react';
 import { Book, Category, Loan, Profile, ActivityLog } from '../../types';
 import { formatDateIndo } from '../../utils/libraryRules';
+import { isVisitorArchived } from '../../utils/visitorDeletion';
 import { getBookCoverUrl } from '../../services/supabaseClient';
 import {
   BookOpen,
@@ -39,7 +40,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
   onOpenAddBookModal,
 }) => {
   const totalBooks = books.length;
-  const totalVisitors = visitors.length;
+  const totalVisitors = visitors.filter((v) => !isVisitorArchived(v)).length;
   const totalCategories = categories.length;
   const pendingLoans = loans.filter((l) => l.status === 'pending').length;
   const activeLoans = loans.filter((l) => l.status === 'approved' || l.status === 'borrowed').length;
