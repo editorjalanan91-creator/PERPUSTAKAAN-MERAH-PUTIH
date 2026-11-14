@@ -205,13 +205,36 @@ async function withServer(
   }
 }
 
-test('rejects unauthenticated delete/archive requests with 401', async () => {
+test('rejects unauthenticated delete/archive/list requests with 401', async () => {
   const mock = createMockSupabaseAdmin();
   await withServer(mock, async (baseUrl) => {
-    const res = await fetch(`${baseUrl}/api/admin/visitors/${VISITOR_NO_LOANS_ID}/delete`, {
+    const listRes = await fetch(`${baseUrl}/api/admin/visitors`);
+    assert.equal(listRes.status, 401);
+
+    const postDeleteRes = await fetch(`${baseUrl}/api/admin/visitors/${VISITOR_NO_LOANS_ID}/delete`, {
       method: 'POST',
     });
-    assert.equal(res.status, 401);
+    assert.equal(postDeleteRes.status, 401);
+
+    const deleteRes = await fetch(`${baseUrl}/api/admin/visitors/${VISITOR_NO_LOANS_ID}`, {
+      method: 'DELETE',
+    });
+    assert.equal(deleteRes.status, 401);
+  });
+});
+
+test('supports DELETE /api/admin/visitors/:id for admin deleting visitor with zero loans', async () => {
+  const mock = createMockSupabaseAdmin();
+  await withServer(mock, async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/api/admin/visitors/${VISITOR_NO_LOANS_ID}`, {
+      method: 'DELETE',
+      headers: { Authorization: 'Bearer admin-token' },
+    });
+    const body = await res.json();
+    assert.equal(res.status, 200);
+    assert.equal(body.success, true);
+    assert.equal(body.mode, 'deleted');
+    assert.deepEqual(mock.deletedAuthUsers, [VISITOR_NO_LOANS_ID]);
   });
 });
 

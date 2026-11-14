@@ -232,7 +232,7 @@ export function createApp(options: ServerAppOptions = {}) {
   });
 
   // Menghapus akun pengunjung secara permanen (hanya jika tidak memiliki riwayat peminjaman)
-  app.post('/api/admin/visitors/:id/delete', async (req: Request, res: Response) => {
+  const handleDeleteVisitorRequest = async (req: Request, res: Response) => {
     try {
       const authHeader = req.headers.authorization || '';
       if (!authHeader.startsWith('Bearer ') || !authHeader.slice('Bearer '.length).trim()) {
@@ -384,7 +384,10 @@ export function createApp(options: ServerAppOptions = {}) {
         error: err?.message || 'Terjadi kesalahan server saat menghapus akun pengunjung.',
       });
     }
-  });
+  };
+
+  app.post('/api/admin/visitors/:id/delete', handleDeleteVisitorRequest);
+  app.delete('/api/admin/visitors/:id', handleDeleteVisitorRequest);
 
   // Mengarsipkan / menonaktifkan akun pengunjung yang memiliki riwayat peminjaman
   app.post('/api/admin/visitors/:id/archive', async (req: Request, res: Response) => {
