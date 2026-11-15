@@ -90,42 +90,242 @@ function isValidUuid(value) {
 function sanitizeEnv(value) {
   return String(value ?? "").trim().replace(/^["']|["']$/g, "");
 }
-function getServerSupabaseConfig() {
-  const url = sanitizeEnv(process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL).replace(
-    /\/+$/,
-    ""
+function decodeJwtRoleClaim(jwt) {
+  const parts = jwt.split(".");
+  if (parts.length !== 3 || !parts[1]) return null;
+  try {
+    const payloadJson = Buffer.from(parts[1], "base64url").toString("utf8");
+    const payload = JSON.parse(payloadJson);
+    return typeof payload?.role === "string" ? payload.role : null;
+  } catch {
+    return null;
+  }
+}
+function inspectServerSupabaseEnv(env = process.env) {
+  const rawServerUrl = sanitizeEnv(env.SUPABASE_URL).replace(/\/+$/, "");
+  const rawViteUrl = sanitizeEnv(env.VITE_SUPABASE_URL).replace(/\/+$/, "");
+  const url = rawServerUrl || rawViteUrl;
+  const hasUrlMismatch = Boolean(rawServerUrl && rawViteUrl && rawServerUrl !== rawViteUrl);
+  const serviceRoleKey = sanitizeEnv(env.SUPABASE_SERVICE_ROLE_KEY);
+  const authApiKey = sanitizeEnv(
+    env.SUPABASE_ANON_KEY || env.VITE_SUPABASE_PUBLISHABLE_KEY || env.VITE_SUPABASE_ANON_KEY
+  ) || serviceRoleKey;
+  const hasSupabaseUrl = Boolean(
+    url && /^https?:\/\/[a-z0-9.-]+(:\d+)?(\/.*)?$/i.test(url) && !url.includes("your-project-ref") && !url.includes("placeholder")
   );
-  const serviceRoleKey = sanitizeEnv(process.env.SUPABASE_SERVICE_ROLE_KEY);
-  if (!url || url.includes("your-project-ref") || url.includes("placeholder")) {
+  if (!hasSupabaseUrl) {
     return {
       url: "",
+      authApiKey: "",
       serviceRoleKey: "",
-      error: "Konfigurasi server SUPABASE_URL / VITE_SUPABASE_URL belum diatur pada Environment Variables server."
+      hasSupabaseUrl: false,
+      hasServiceRoleKey: Boolean(serviceRoleKey),
+      isServiceRoleKeyValid: false,
+      keyStatus: serviceRoleKey ? "unrecognized_format" : "missing",
+      hasUrlMismatch,
+      error: "Konfigurasi server SUPABASE_URL / VITE_SUPABASE_URL belum diatur atau belum valid pada Environment Variables server."
     };
   }
-  if (!serviceRoleKey || serviceRoleKey.includes("your-supabase-service-role-key")) {
+  if (!serviceRoleKey) {
     return {
       url,
+      authApiKey,
       serviceRoleKey: "",
+      hasSupabaseUrl: true,
+      hasServiceRoleKey: false,
+      isServiceRoleKeyValid: false,
+      keyStatus: "missing",
+      hasUrlMismatch,
       error: "Konfigurasi server SUPABASE_SERVICE_ROLE_KEY belum diatur pada Environment Variables server (Vercel / .env). Kunci rahasia ini hanya boleh dipasang di server, bukan di frontend."
     };
   }
-  return { url, serviceRoleKey };
-}
-function defaultCreateSupabaseAdminClient() {
-  const config = getServerSupabaseConfig();
-  if (config.error) {
-    return { client: null, error: config.error };
+  if (serviceRoleKey.includes("your-supabase-service-role-key")) {
+    return {
+      url,
+      authApiKey,
+      serviceRoleKey: "",
+      hasSupabaseUrl: true,
+      hasServiceRoleKey: false,
+      isServiceRoleKeyValid: false,
+      keyStatus: "invalid_placeholder",
+      hasUrlMismatch,
+      error: "Konfigurasi server SUPABASE_SERVICE_ROLE_KEY masih menggunakan nilai contoh. Isi dengan Secret / Service Role Key asli dari Supabase Dashboard."
+    };
   }
-  const client = createClient(config.url, config.serviceRoleKey, {
+  if (serviceRoleKey.startsWith("sb_publishable_")) {
+    return {
+      url,
+      authApiKey,
+      serviceRoleKey: "",
+      hasSupabaseUrl: true,
+      hasServiceRoleKey: true,
+      isServiceRoleKeyValid: false,
+      keyStatus: "invalid_publishable_key",
+      hasUrlMismatch,
+      error: "Konfigurasi SUPABASE_SERVICE_ROLE_KEY di server terdeteksi menggunakan Publishable Key (sb_publishable_...), bukan Secret Key (sb_secret_... / service_role). Perbarui Environment Variable SUPABASE_SERVICE_ROLE_KEY di Vercel."
+    };
+  }
+  if (serviceRoleKey.startsWith("sb_secret_")) {
+    return {
+      url,
+      authApiKey,
+      serviceRoleKey,
+      hasSupabaseUrl: true,
+      hasServiceRoleKey: true,
+      isServiceRoleKeyValid: true,
+      keyStatus: "valid_secret_key",
+      hasUrlMismatch
+    };
+  }
+  const jwtRole = decodeJwtRoleClaim(serviceRoleKey);
+  if (jwtRole === "anon" || jwtRole === "authenticated") {
+    return {
+      url,
+      authApiKey,
+      serviceRoleKey: "",
+      hasSupabaseUrl: true,
+      hasServiceRoleKey: true,
+      isServiceRoleKeyValid: false,
+      keyStatus: "invalid_anon_jwt",
+      hasUrlMismatch,
+      error: `Konfigurasi SUPABASE_SERVICE_ROLE_KEY di server terdeteksi menggunakan kunci ber-role "${jwtRole}", bukan "service_role". Perbarui Environment Variable SUPABASE_SERVICE_ROLE_KEY di Vercel dengan Service Role Key Supabase.`
+    };
+  }
+  if (jwtRole === "service_role") {
+    return {
+      url,
+      authApiKey,
+      serviceRoleKey,
+      hasSupabaseUrl: true,
+      hasServiceRoleKey: true,
+      isServiceRoleKeyValid: true,
+      keyStatus: "valid_service_role_jwt",
+      hasUrlMismatch
+    };
+  }
+  return {
+    url,
+    authApiKey,
+    serviceRoleKey,
+    hasSupabaseUrl: true,
+    hasServiceRoleKey: true,
+    isServiceRoleKeyValid: true,
+    keyStatus: "unrecognized_format",
+    hasUrlMismatch
+  };
+}
+function defaultCreateSupabaseAuthClient() {
+  const inspection = inspectServerSupabaseEnv();
+  if (!inspection.hasSupabaseUrl) {
+    return { client: null, error: inspection.error };
+  }
+  const keyForAuth = inspection.authApiKey || inspection.serviceRoleKey;
+  if (!keyForAuth) {
+    return {
+      client: null,
+      error: inspection.error || "Kunci API Supabase untuk verifikasi autentikasi server belum tersedia."
+    };
+  }
+  const client = createClient(inspection.url, keyForAuth, {
     auth: {
       persistSession: false,
-      autoRefreshToken: false
+      autoRefreshToken: false,
+      detectSessionInUrl: false
     }
   });
   return { client };
 }
-async function verifyAdminRequest(req, supabaseAdmin) {
+function createAdminClientFetch(serviceRoleKey, fetchImpl = fetch) {
+  const isNewSecretKey = serviceRoleKey.startsWith("sb_secret_");
+  return async (input, init) => {
+    const headers = new Headers(init?.headers);
+    headers.set("apikey", serviceRoleKey);
+    if (isNewSecretKey) {
+      headers.delete("Authorization");
+    } else {
+      headers.set("Authorization", `Bearer ${serviceRoleKey}`);
+    }
+    return fetchImpl(input, { ...init, headers });
+  };
+}
+function defaultCreateSupabaseAdminClient(options = {}) {
+  const inspection = inspectServerSupabaseEnv(options.env);
+  if (inspection.error || !inspection.serviceRoleKey) {
+    return { client: null, error: inspection.error || "Konfigurasi Admin Supabase tidak lengkap." };
+  }
+  const isNewSecretKey = inspection.serviceRoleKey.startsWith("sb_secret_");
+  const adminFetch = createAdminClientFetch(
+    inspection.serviceRoleKey,
+    options.fetchImpl ?? fetch
+  );
+  const client = createClient(inspection.url, inspection.serviceRoleKey, {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+      detectSessionInUrl: false
+    },
+    global: {
+      fetch: adminFetch,
+      headers: isNewSecretKey ? {
+        apikey: inspection.serviceRoleKey
+      } : {
+        apikey: inspection.serviceRoleKey,
+        Authorization: `Bearer ${inspection.serviceRoleKey}`
+      }
+    }
+  });
+  return { client };
+}
+async function probeAdminProfilesAccess(getAdminClient = () => defaultCreateSupabaseAdminClient()) {
+  const { client: supabaseAdmin, error: adminClientError } = getAdminClient();
+  if (!supabaseAdmin) {
+    return {
+      ok: false,
+      statusCode: 500,
+      profilesOk: false,
+      authAdminOk: false,
+      errorCode: "ADMIN_CLIENT_NOT_CONFIGURED",
+      errorMessage: adminClientError || "Konfigurasi Admin Supabase tidak lengkap."
+    };
+  }
+  const { error: profilesError } = await supabaseAdmin.from("profiles").select("id", { head: true }).limit(1);
+  if (profilesError) {
+    return {
+      ok: false,
+      statusCode: 500,
+      profilesOk: false,
+      authAdminOk: false,
+      errorCode: profilesError.code || "PROFILES_QUERY_ERROR",
+      errorMessage: profilesError.message
+    };
+  }
+  let authAdminOk = true;
+  if (supabaseAdmin.auth?.admin?.listUsers) {
+    const { error: authAdminError } = await supabaseAdmin.auth.admin.listUsers({
+      page: 1,
+      perPage: 1
+    });
+    if (authAdminError) {
+      return {
+        ok: false,
+        statusCode: 500,
+        profilesOk: true,
+        authAdminOk: false,
+        errorCode: authAdminError.code || "AUTH_ADMIN_ERROR",
+        errorMessage: authAdminError.message
+      };
+    }
+  } else {
+    authAdminOk = false;
+  }
+  return {
+    ok: true,
+    statusCode: 200,
+    profilesOk: true,
+    authAdminOk
+  };
+}
+async function verifyAdminRequest(req, supabaseAuth, supabaseAdmin) {
   const authHeader = req.headers.authorization || "";
   if (!authHeader.startsWith("Bearer ")) {
     return {
@@ -142,7 +342,7 @@ async function verifyAdminRequest(req, supabaseAdmin) {
       error: "Token sesi administrator kosong atau tidak valid."
     };
   }
-  const { data: authData, error: authError } = await supabaseAdmin.auth.getUser(token);
+  const { data: authData, error: authError } = await supabaseAuth.auth.getUser(token);
   if (authError || !authData?.user) {
     return {
       ok: false,
@@ -152,10 +352,11 @@ async function verifyAdminRequest(req, supabaseAdmin) {
   }
   const { data: actorProfile, error: profileError } = await supabaseAdmin.from("profiles").select("id, role, full_name, username").eq("id", authData.user.id).maybeSingle();
   if (profileError) {
+    const isPermDenied = profileError.message.toLowerCase().includes("permission denied");
     return {
       ok: false,
       status: 500,
-      error: `Gagal memverifikasi role administrator: ${profileError.message}`
+      error: isPermDenied ? `Gagal memverifikasi role administrator: ${profileError.message}. Pastikan SUPABASE_SERVICE_ROLE_KEY di Environment Variables Vercel benar-benar menggunakan Service Role / Secret Key Supabase (bukan Publishable/Anon Key) dan hak akses service_role pada tabel public.profiles aktif.` : `Gagal memverifikasi role administrator: ${profileError.message}`
     };
   }
   if (!actorProfile || actorProfile.role !== "admin") {
@@ -178,12 +379,24 @@ function isUserCurrentlyBanned(bannedUntil) {
 function createApp(options = {}) {
   const app2 = express();
   const getAdminClient = options.getAdminClient ?? defaultCreateSupabaseAdminClient;
+  const getAuthClient = options.getAuthClient ?? (options.getAdminClient ? options.getAdminClient : defaultCreateSupabaseAuthClient);
   app2.use(express.json());
-  app2.get("/api/health", (_req, res) => {
+  app2.get("/api/health", async (req, res) => {
+    const envInspection = inspectServerSupabaseEnv();
+    const shouldProbeProfiles = req.query.probe === "profiles";
+    const profilesProbe = shouldProbeProfiles ? await probeAdminProfilesAccess(() => getAdminClient()) : void 0;
     res.json({
       status: "ok",
       service: "PERPUSTAKAAN MERAH PUTIH",
       database: "Supabase PostgreSQL",
+      envStatus: {
+        hasSupabaseUrl: envInspection.hasSupabaseUrl,
+        hasServiceRoleKey: envInspection.hasServiceRoleKey,
+        serviceRoleKeyValid: envInspection.isServiceRoleKeyValid,
+        serviceRoleKeyStatus: envInspection.keyStatus,
+        hasUrlMismatch: envInspection.hasUrlMismatch
+      },
+      ...profilesProbe ? { profilesProbe } : {},
       timestamp: (/* @__PURE__ */ new Date()).toISOString()
     });
   });
@@ -195,17 +408,22 @@ function createApp(options = {}) {
           error: "Autentikasi diperlukan. Token sesi administrator tidak ditemukan."
         });
       }
-      const { client: supabaseAdmin, error: configError } = getAdminClient();
-      if (!supabaseAdmin) {
-        return res.status(500).json({ error: configError || "Konfigurasi server belum lengkap." });
+      const { client: supabaseAuth, error: authClientError } = getAuthClient();
+      const { client: supabaseAdmin, error: adminClientError } = getAdminClient();
+      if (!supabaseAuth || !supabaseAdmin) {
+        return res.status(500).json({
+          error: adminClientError || authClientError || "Konfigurasi server belum lengkap."
+        });
       }
-      const authCheck = await verifyAdminRequest(req, supabaseAdmin);
+      const authCheck = await verifyAdminRequest(req, supabaseAuth, supabaseAdmin);
       if (!authCheck.ok) {
         return res.status(authCheck.status).json({ error: authCheck.error });
       }
       const { data: profiles, error: profilesError } = await supabaseAdmin.from("profiles").select("*").neq("role", "admin").order("created_at", { ascending: false });
       if (profilesError) {
-        return res.status(500).json({ error: `Gagal memuat daftar pengunjung: ${profilesError.message}` });
+        return res.status(500).json({
+          error: `Gagal memuat daftar pengunjung: ${profilesError.message}`
+        });
       }
       const authUsersById = /* @__PURE__ */ new Map();
       try {
@@ -255,11 +473,14 @@ function createApp(options = {}) {
         });
       }
       const targetId = String(req.params.id || "").trim();
-      const { client: supabaseAdmin, error: configError } = getAdminClient();
-      if (!supabaseAdmin) {
-        return res.status(500).json({ error: configError || "Konfigurasi server belum lengkap." });
+      const { client: supabaseAuth, error: authClientError } = getAuthClient();
+      const { client: supabaseAdmin, error: adminClientError } = getAdminClient();
+      if (!supabaseAuth || !supabaseAdmin) {
+        return res.status(500).json({
+          error: adminClientError || authClientError || "Konfigurasi server belum lengkap."
+        });
       }
-      const authCheck = await verifyAdminRequest(req, supabaseAdmin);
+      const authCheck = await verifyAdminRequest(req, supabaseAuth, supabaseAdmin);
       if (!authCheck.ok) {
         return res.status(authCheck.status).json({ error: authCheck.error });
       }
@@ -368,11 +589,14 @@ function createApp(options = {}) {
         });
       }
       const targetId = String(req.params.id || "").trim();
-      const { client: supabaseAdmin, error: configError } = getAdminClient();
-      if (!supabaseAdmin) {
-        return res.status(500).json({ error: configError || "Konfigurasi server belum lengkap." });
+      const { client: supabaseAuth, error: authClientError } = getAuthClient();
+      const { client: supabaseAdmin, error: adminClientError } = getAdminClient();
+      if (!supabaseAuth || !supabaseAdmin) {
+        return res.status(500).json({
+          error: adminClientError || authClientError || "Konfigurasi server belum lengkap."
+        });
       }
-      const authCheck = await verifyAdminRequest(req, supabaseAdmin);
+      const authCheck = await verifyAdminRequest(req, supabaseAuth, supabaseAdmin);
       if (!authCheck.ok) {
         return res.status(authCheck.status).json({ error: authCheck.error });
       }

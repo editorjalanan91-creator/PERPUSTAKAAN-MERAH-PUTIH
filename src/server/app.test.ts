@@ -1,18 +1,58 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { createApp } from './app';
+import {
+  createApp,
+  defaultCreateSupabaseAdminClient,
+  inspectServerSupabaseEnv,
+  probeAdminProfilesAccess,
+} from './app';
 
 const ADMIN_ID = '11111111-1111-4111-8111-111111111111';
 const ADMIN_2_ID = '22222222-2222-4222-8222-222222222222';
 const VISITOR_NO_LOANS_ID = '33333333-3333-4333-8333-333333333333';
 const VISITOR_WITH_LOANS_ID = '44444444-4444-4444-8444-444444444444';
 
-function createMockSupabaseAdmin(options?: { simulateMissingArchiveCols?: boolean }) {
+function makeFakeJwt(payloadObj: Record<string, unknown>): string {
+  const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+  const payload = Buffer.from(JSON.stringify(payloadObj)).toString('base64url');
+  return `${header}.${payload}.fake-signature`;
+}
+
+function createMockSupabaseAuthClient() {
+  const verifiedTokens: string[] = [];
+  const client: any = {
+    auth: {
+      async getUser(token: string) {
+        verifiedTokens.push(token);
+        if (token === 'admin-token') {
+          return { data: { user: { id: ADMIN_ID, email: 'admin@perpustakaan.go.id' } }, error: null };
+        }
+        if (token === 'visitor-token') {
+          return {
+            data: { user: { id: VISITOR_NO_LOANS_ID, email: 'budi@example.com' } },
+            error: null,
+          };
+        }
+        return { data: { user: null }, error: { message: 'Invalid token' } };
+      },
+    },
+    from() {
+      throw new Error('Auth client must NEVER be used to query database tables directly');
+    },
+  };
+  return { client, verifiedTokens };
+}
+
+function createMockSupabaseAdmin(options?: {
+  simulateMissingArchiveCols?: boolean;
+  simulateProfilesPermissionDenied?: boolean;
+}) {
   const deletedAuthUsers: string[] = [];
   const deletedProfiles: string[] = [];
   const updatedAuthUsers: Array<{ id: string; payload: any }> = [];
   const activityLogs: any[] = [];
+  const loansMutations: string[] = [];
 
   const profiles: Record<string, any> = {
     [ADMIN_ID]: { id: ADMIN_ID, full_name: 'Admin Utama', username: 'Admin', role: 'admin' },
@@ -38,17 +78,8 @@ function createMockSupabaseAdmin(options?: { simulateMissingArchiveCols?: boolea
 
   const client: any = {
     auth: {
-      async getUser(token: string) {
-        if (token === 'admin-token') {
-          return { data: { user: { id: ADMIN_ID, email: 'admin@perpustakaan.go.id' } }, error: null };
-        }
-        if (token === 'visitor-token') {
-          return {
-            data: { user: { id: VISITOR_NO_LOANS_ID, email: 'budi@example.com' } },
-            error: null,
-          };
-        }
-        return { data: { user: null }, error: { message: 'Invalid token' } };
+      async getUser() {
+        throw new Error('Admin client must NEVER verify end-user tokens via auth.getUser()');
       },
       admin: {
         async listUsers() {
@@ -148,22 +179,43 @@ function createMockSupabaseAdmin(options?: { simulateMissingArchiveCols?: boolea
           );
           return Promise.resolve({ data: rows, error: null });
         },
+        limit(maxRows: number) {
+          const rows = Object.values(profiles)
+            .filter((p: any) => (neqCol ? p[neqCol] !== neqVal : true))
+            .slice(0, maxRows);
+          return Promise.resolve({ data: rows, error: null });
+        },
         maybeSingle() {
+          if (table === 'profiles' && options?.simulateProfilesPermissionDenied) {
+            return Promise.resolve({
+              data: null,
+              error: { code: '42501', message: 'permission denied for table profiles' },
+            });
+          }
           if (table === 'profiles' && filterCol === 'id') {
             return Promise.resolve({ data: profiles[filterVal] ?? null, error: null });
           }
           return Promise.resolve({ data: null, error: null });
         },
         delete() {
+          if (table === 'loans') {
+            loansMutations.push('delete');
+          }
           isDelete = true;
           return chain;
         },
         update(payload: any) {
+          if (table === 'loans') {
+            loansMutations.push('update');
+          }
           isUpdate = true;
           updatePayload = payload;
           return chain;
         },
         insert(payload: any) {
+          if (table === 'loans') {
+            loansMutations.push('insert');
+          }
           if (table === 'activity_logs') {
             activityLogs.push(payload);
           }
@@ -180,15 +232,18 @@ function createMockSupabaseAdmin(options?: { simulateMissingArchiveCols?: boolea
     deletedProfiles,
     updatedAuthUsers,
     activityLogs,
+    loansMutations,
     profiles,
   };
 }
 
 async function withServer(
   mockAdmin: ReturnType<typeof createMockSupabaseAdmin>,
-  fn: (baseUrl: string) => Promise<void>
+  fn: (baseUrl: string, mockAuth: ReturnType<typeof createMockSupabaseAuthClient>) => Promise<void>
 ) {
+  const mockAuth = createMockSupabaseAuthClient();
   const app = createApp({
+    getAuthClient: () => ({ client: mockAuth.client }),
     getAdminClient: () => ({ client: mockAdmin.client }),
   });
   const server = http.createServer(app);
@@ -197,13 +252,83 @@ async function withServer(
   assert.ok(address && typeof address === 'object');
   const baseUrl = `http://127.0.0.1:${address.port}`;
   try {
-    await fn(baseUrl);
+    await fn(baseUrl, mockAuth);
   } finally {
     await new Promise<void>((resolve, reject) =>
       server.close((err) => (err ? reject(err) : resolve()))
     );
   }
 }
+
+test('inspectServerSupabaseEnv validates SUPABASE_URL and distinguishes service_role vs anon/publishable keys without leaking secrets', () => {
+  const validJwt = makeFakeJwt({ role: 'service_role', iss: 'supabase' });
+  const anonJwt = makeFakeJwt({ role: 'anon', iss: 'supabase' });
+
+  const okJwt = inspectServerSupabaseEnv({
+    SUPABASE_URL: 'https://demo.supabase.co',
+    SUPABASE_SERVICE_ROLE_KEY: validJwt,
+  });
+  assert.equal(okJwt.hasSupabaseUrl, true);
+  assert.equal(okJwt.hasServiceRoleKey, true);
+  assert.equal(okJwt.isServiceRoleKeyValid, true);
+  assert.equal(okJwt.keyStatus, 'valid_service_role_jwt');
+
+  const okSecret = inspectServerSupabaseEnv({
+    SUPABASE_URL: 'https://demo.supabase.co',
+    SUPABASE_SERVICE_ROLE_KEY: 'sb_secret_fake_key_value_for_testing',
+  });
+  assert.equal(okSecret.isServiceRoleKeyValid, true);
+  assert.equal(okSecret.keyStatus, 'valid_secret_key');
+
+  const badAnon = inspectServerSupabaseEnv({
+    SUPABASE_URL: 'https://demo.supabase.co',
+    SUPABASE_SERVICE_ROLE_KEY: anonJwt,
+  });
+  assert.equal(badAnon.isServiceRoleKeyValid, false);
+  assert.equal(badAnon.keyStatus, 'invalid_anon_jwt');
+  assert.ok(!badAnon.error?.includes(anonJwt));
+
+  const badPub = inspectServerSupabaseEnv({
+    SUPABASE_URL: 'https://demo.supabase.co',
+    SUPABASE_SERVICE_ROLE_KEY: 'sb_publishable_wrong_key',
+  });
+  assert.equal(badPub.isServiceRoleKeyValid, false);
+  assert.equal(badPub.keyStatus, 'invalid_publishable_key');
+  assert.ok(!badPub.error?.includes('sb_publishable_wrong_key'));
+
+  const missingKey = inspectServerSupabaseEnv({
+    SUPABASE_URL: 'https://demo.supabase.co',
+  });
+  assert.equal(missingKey.isServiceRoleKeyValid, false);
+  assert.equal(missingKey.keyStatus, 'missing');
+});
+
+test('separates Auth client (token verification) from Admin client (profiles query) and returns visitors for admin', async () => {
+  const mock = createMockSupabaseAdmin();
+  await withServer(mock, async (baseUrl, mockAuth) => {
+    const res = await fetch(`${baseUrl}/api/admin/visitors`, {
+      headers: { Authorization: 'Bearer admin-token' },
+    });
+    const body = await res.json();
+    assert.equal(res.status, 200);
+    assert.equal(mockAuth.verifiedTokens.includes('admin-token'), true);
+    assert.equal(Array.isArray(body.visitors), true);
+    assert.equal(body.visitors.length, 2);
+  });
+});
+
+test('returns diagnostic guidance on permission denied for table profiles without exposing secrets', async () => {
+  const mock = createMockSupabaseAdmin({ simulateProfilesPermissionDenied: true });
+  await withServer(mock, async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/api/admin/visitors`, {
+      headers: { Authorization: 'Bearer admin-token' },
+    });
+    const body = await res.json();
+    assert.equal(res.status, 500);
+    assert.match(body.error, /permission denied for table profiles/i);
+    assert.match(body.error, /SUPABASE_SERVICE_ROLE_KEY/);
+  });
+});
 
 test('rejects unauthenticated delete/archive/list requests with 401', async () => {
   const mock = createMockSupabaseAdmin();
@@ -296,6 +421,7 @@ test('permanently deletes Auth user and public.profiles row when visitor has zer
     assert.equal(body.mode, 'deleted');
     assert.deepEqual(mock.deletedAuthUsers, [VISITOR_NO_LOANS_ID]);
     assert.deepEqual(mock.deletedProfiles, [VISITOR_NO_LOANS_ID]);
+    assert.deepEqual(mock.loansMutations, []);
     assert.equal(mock.activityLogs.length, 1);
     assert.equal(mock.activityLogs[0].action, 'delete_visitor');
   });
@@ -316,6 +442,106 @@ test('archives and bans visitor with loan history cleanly even without optional 
     assert.equal(mock.updatedAuthUsers[0].id, VISITOR_WITH_LOANS_ID);
     assert.equal(mock.updatedAuthUsers[0].payload.ban_duration, '876000h');
     assert.equal(mock.updatedAuthUsers[0].payload.user_metadata.is_active, false);
+    assert.deepEqual(mock.loansMutations, []);
     assert.equal(mock.activityLogs[0].action, 'archive_visitor');
   });
+});
+
+test('Admin Client sends sb_secret_ ONLY in apikey header (never as Authorization Bearer) for REST and Auth Admin', async () => {
+  const capturedRequests: Array<{ url: string; apikey: string | null; authorization: string | null }> = [];
+  const fakeSecret = 'sb_secret_test_only_never_bearer_12345';
+
+  const { client, error } = defaultCreateSupabaseAdminClient({
+    env: {
+      SUPABASE_URL: 'https://demo-project.supabase.co',
+      SUPABASE_SERVICE_ROLE_KEY: fakeSecret,
+      VITE_SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_client_key_should_not_be_used',
+    },
+    fetchImpl: (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      capturedRequests.push({
+        url,
+        apikey: headers.get('apikey'),
+        authorization: headers.get('Authorization'),
+      });
+      const body = url.includes('/auth/v1/admin/') ? JSON.stringify({ users: [] }) : JSON.stringify([]);
+      return new Response(body, { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as typeof fetch,
+  });
+
+  assert.equal(error, undefined);
+  assert.ok(client);
+
+  await client.from('profiles').select('id').limit(1);
+  await client.auth.admin.listUsers({ page: 1, perPage: 1 });
+
+  assert.equal(capturedRequests.length, 2);
+  for (const req of capturedRequests) {
+    assert.equal(req.apikey, fakeSecret);
+    assert.equal(req.authorization, null);
+  }
+});
+
+test('Admin Client forces service_role JWT on both apikey and Authorization headers for legacy keys', async () => {
+  const capturedRequests: Array<{ apikey: string | null; authorization: string | null }> = [];
+  const legacyServiceJwt = makeFakeJwt({ role: 'service_role', iss: 'supabase' });
+
+  const { client, error } = defaultCreateSupabaseAdminClient({
+    env: {
+      SUPABASE_URL: 'https://demo-project.supabase.co',
+      SUPABASE_SERVICE_ROLE_KEY: legacyServiceJwt,
+    },
+    fetchImpl: (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      capturedRequests.push({
+        apikey: headers.get('apikey'),
+        authorization: headers.get('Authorization'),
+      });
+      return new Response(JSON.stringify([]), { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as typeof fetch,
+  });
+
+  assert.equal(error, undefined);
+  assert.ok(client);
+
+  await client.from('profiles').select('id').limit(1);
+
+  assert.equal(capturedRequests.length, 1);
+  assert.equal(capturedRequests[0].apikey, legacyServiceJwt);
+  assert.equal(capturedRequests[0].authorization, `Bearer ${legacyServiceJwt}`);
+});
+
+test('probeAdminProfilesAccess reports status/error code cleanly without returning personal profile data', async () => {
+  const okMock = createMockSupabaseAdmin();
+  const okProbe = await probeAdminProfilesAccess(() => ({ client: okMock.client }));
+  assert.deepEqual(okProbe, {
+    ok: true,
+    statusCode: 200,
+    profilesOk: true,
+    authAdminOk: true,
+  });
+
+  const deniedMock: any = {
+    from() {
+      return {
+        select() {
+          return {
+            limit() {
+              return Promise.resolve({
+                error: { code: '42501', message: 'permission denied for table profiles' },
+              });
+            },
+          };
+        },
+      };
+    },
+  };
+  const deniedProbe = await probeAdminProfilesAccess(() => ({ client: deniedMock }));
+  assert.equal(deniedProbe.ok, false);
+  assert.equal(deniedProbe.statusCode, 500);
+  assert.equal(deniedProbe.profilesOk, false);
+  assert.equal(deniedProbe.authAdminOk, false);
+  assert.equal(deniedProbe.errorCode, '42501');
+  assert.match(deniedProbe.errorMessage || '', /permission denied/i);
 });
