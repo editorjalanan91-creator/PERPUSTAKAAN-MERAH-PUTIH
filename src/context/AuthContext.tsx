@@ -5,6 +5,8 @@ import {
   ADMIN_EMAIL,
   RESET_PASSWORD_REDIRECT_URL,
   getSupabaseConfigError,
+  getSupabaseHostLabel,
+  probeBrowserSupabaseConnection,
   recordActivityLog,
   initialAuthCallback,
   isPasswordRecoveryActive,
@@ -32,6 +34,9 @@ interface AuthContextType {
   recoveryEmail: string | null;
   recoveryLinkError: string | null;
   clearRecoveryLinkError: () => void;
+  supabaseConnectionError: string | null;
+  isCheckingConnection: boolean;
+  recheckSupabaseConnection: () => Promise<boolean>;
   login: (identifier: string, password: string) => Promise<User>;
   register: (payload: {
     fullName: string;
@@ -54,23 +59,35 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-const VALID_ROLES: UserRole[] = ['admin', 'visitor', 'user'];
+const VALID_ROLES: UserRole[] = ['admin', 'super_admin', 'visitor', 'user'];
+
+function isPrivilegedAdminRole(role: UserRole | string | undefined | null): boolean {
+  return role === 'admin' || role === 'super_admin';
+}
+
+function isNetworkConnectionErrorMessage(rawMessage: string): boolean {
+  const lower = (rawMessage || '').trim().toLowerCase();
+  return (
+    lower.includes('failed to fetch') ||
+    lower.includes('networkerror') ||
+    lower.includes('load failed') ||
+    lower.includes('network request failed') ||
+    lower.includes('err_name_not_resolved')
+  );
+}
 
 function formatSupabaseAuthError(rawMessage: string): string {
   const msg = (rawMessage || '').trim();
   const lower = msg.toLowerCase();
 
-  if (
-    lower.includes('failed to fetch') ||
-    lower.includes('networkerror') ||
-    lower.includes('load failed') ||
-    lower.includes('network request failed')
-  ) {
+  if (isNetworkConnectionErrorMessage(msg)) {
     const configErr = getSupabaseConfigError();
     if (configErr) {
       return configErr;
     }
-    return 'Gagal terhubung ke server Supabase (Failed to fetch). Pastikan URL Supabase benar, project Supabase aktif (tidak paused), dan koneksi internet/CORS tidak terblokir.';
+    const hostLabel = getSupabaseHostLabel();
+    const targetInfo = hostLabel ? ` ke host "${hostLabel}"` : '';
+    return `Gagal terhubung ke server Supabase${targetInfo} (Failed to fetch). Periksa apakah URL pada VITE_SUPABASE_URL sudah benar, uji resolusi DNS lokal (atau aktifkan Chrome Secure DNS 1.1.1.1 / 8.8.8.8 jika DNS ISP gagal me-resolve), pastikan project Supabase aktif, dan lakukan hard refresh / redeploy Vercel tanpa build cache.`;
   }
 
   if (lower.includes('user already registered') || lower.includes('already been registered')) {
@@ -128,9 +145,30 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [recoveryLinkError, setRecoveryLinkError] = useState<string | null>(() =>
     formatRecoveryUrlError(initialAuthCallback)
   );
+  const [supabaseConnectionError, setSupabaseConnectionError] = useState<string | null>(() =>
+    getSupabaseConfigError()
+  );
+  const [isCheckingConnection, setIsCheckingConnection] = useState<boolean>(false);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
 
   const clearRecoveryLinkError = () => setRecoveryLinkError(null);
+
+  const recheckSupabaseConnection = async (): Promise<boolean> => {
+    setIsCheckingConnection(true);
+    try {
+      const result = await probeBrowserSupabaseConnection();
+      if (result.ok) {
+        setSupabaseConnectionError(null);
+        return true;
+      }
+      setSupabaseConnectionError(
+        result.error || 'Gagal memverifikasi koneksi browser ke server Supabase.'
+      );
+      return false;
+    } finally {
+      setIsCheckingConnection(false);
+    }
+  };
 
   const showToast = (message: string, type: 'success' | 'error' | 'info' = 'success', title?: string) => {
     const id = `toast_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
@@ -175,6 +213,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         role: profile.role as UserRole,
         is_active: profile.is_active,
         archived_at: profile.archived_at ?? null,
+        is_super_admin: Boolean(profile.is_super_admin),
         created_at: profile.created_at,
         createdAt: profile.created_at,
         updated_at: profile.updated_at,
@@ -216,14 +255,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         Boolean(profile.archived_at) ||
         authUser.user_metadata?.is_active === false;
 
-      if (!inRecoveryFlow && isArchivedAccount && profile.role !== 'admin') {
+      if (!inRecoveryFlow && isArchivedAccount && !isPrivilegedAdminRole(profile.role)) {
         await supabase.auth.signOut().catch(() => undefined);
         if (isMounted) setUser(null);
         return;
       }
 
       // Pengunjung wajib sudah memverifikasi email (jangan batalkan sesi saat proses recovery)
-      if (!inRecoveryFlow && profile.role !== 'admin' && !authUser.email_confirmed_at) {
+      if (!inRecoveryFlow && !isPrivilegedAdminRole(profile.role) && !authUser.email_confirmed_at) {
         await supabase.auth.signOut().catch(() => undefined);
         if (isMounted) setUser(null);
         return;
@@ -267,12 +306,32 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (isMounted && initCompleted) setIsLoading(false);
     });
 
+    const handleOnline = () => {
+      void recheckSupabaseConnection();
+    };
+    if (typeof window !== 'undefined') {
+      window.addEventListener('online', handleOnline);
+    }
+
     const initAuth = async () => {
       try {
-        if (getSupabaseConfigError()) {
-          if (isMounted) setUser(null);
+        const configErr = getSupabaseConfigError();
+        if (configErr) {
+          if (isMounted) {
+            setSupabaseConnectionError(configErr);
+            setUser(null);
+          }
           return;
         }
+
+        const probePromise = probeBrowserSupabaseConnection().then((probe) => {
+          if (!isMounted) return;
+          if (probe.ok) {
+            setSupabaseConnectionError(null);
+          } else if (probe.error) {
+            setSupabaseConnectionError(probe.error);
+          }
+        });
 
         // Tangani link recovery berbasis token_hash (jika template email mengirim ?token_hash=...&type=recovery)
         if (initialAuthCallback.isOtpRecovery && initialAuthCallback.tokenHash) {
@@ -361,6 +420,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           }
           await resolveSessionUser(session?.user ?? null, false);
         }
+        await probePromise;
       } catch (err) {
         console.error('Error saat inisialisasi Supabase auth session:', err);
       } finally {
@@ -374,6 +434,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return () => {
       isMounted = false;
       unsubscribe();
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('online', handleOnline);
+      }
     };
   }, []);
 
@@ -405,14 +468,24 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         password,
       });
     } catch (networkErr: any) {
-      throw new Error(formatSupabaseAuthError(networkErr?.message || 'Failed to fetch'));
+      const formatted = formatSupabaseAuthError(networkErr?.message || 'Failed to fetch');
+      setSupabaseConnectionError(formatted);
+      throw new Error(formatted);
     }
 
     const { data, error } = authResult;
 
     if (error) {
-      throw new Error(formatSupabaseAuthError(error.message));
+      const formatted = formatSupabaseAuthError(error.message);
+      if (isNetworkConnectionErrorMessage(error.message)) {
+        setSupabaseConnectionError(formatted);
+      } else {
+        setSupabaseConnectionError(null);
+      }
+      throw new Error(formatted);
     }
+
+    setSupabaseConnectionError(null);
 
     if (!data.user) {
       throw new Error('Sesi autentikasi tidak ditemukan.');
@@ -426,7 +499,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
 
     if (
-      profile.role !== 'admin' &&
+      !isPrivilegedAdminRole(profile.role) &&
       (profile.is_active === false ||
         Boolean(profile.archived_at) ||
         data.user.user_metadata?.is_active === false)
@@ -436,7 +509,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
 
     // Pengunjung wajib terverifikasi sebelum masuk
-    if (profile.role !== 'admin' && !data.user.email_confirmed_at) {
+    if (!isPrivilegedAdminRole(profile.role) && !data.user.email_confirmed_at) {
       await supabase.auth.signOut().catch(() => undefined);
       throw new Error('Email Anda belum diverifikasi. Harap buka tautan verifikasi yang dikirimkan ke email Anda terlebih dahulu.');
     }
@@ -454,7 +527,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     });
 
     showToast(
-      profile.role === 'admin'
+      isPrivilegedAdminRole(profile.role)
         ? 'Selamat datang di Panel Admin Perpustakaan Merah Putih!'
         : `Selamat datang kembali, ${profile.full_name}!`,
       'success',
@@ -512,14 +585,24 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         },
       });
     } catch (networkErr: any) {
-      throw new Error(formatSupabaseAuthError(networkErr?.message || 'Failed to fetch'));
+      const formatted = formatSupabaseAuthError(networkErr?.message || 'Failed to fetch');
+      setSupabaseConnectionError(formatted);
+      throw new Error(formatted);
     }
 
     const { data, error } = signUpResult;
 
     if (error) {
-      throw new Error(formatSupabaseAuthError(error.message));
+      const formatted = formatSupabaseAuthError(error.message);
+      if (isNetworkConnectionErrorMessage(error.message)) {
+        setSupabaseConnectionError(formatted);
+      } else {
+        setSupabaseConnectionError(null);
+      }
+      throw new Error(formatted);
     }
+
+    setSupabaseConnectionError(null);
 
     // Supabase mengembalikan identities kosong jika email sudah terdaftar dan proteksi enumerasi aktif
     if (data.user && Array.isArray(data.user.identities) && data.user.identities.length === 0) {
@@ -577,12 +660,22 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         redirectTo: RESET_PASSWORD_REDIRECT_URL,
       });
     } catch (networkErr: any) {
-      throw new Error(formatSupabaseAuthError(networkErr?.message || 'Failed to fetch'));
+      const formatted = formatSupabaseAuthError(networkErr?.message || 'Failed to fetch');
+      setSupabaseConnectionError(formatted);
+      throw new Error(formatted);
     }
 
     if (resetResult.error) {
-      throw new Error(formatSupabaseAuthError(resetResult.error.message));
+      const formatted = formatSupabaseAuthError(resetResult.error.message);
+      if (isNetworkConnectionErrorMessage(resetResult.error.message)) {
+        setSupabaseConnectionError(formatted);
+      } else {
+        setSupabaseConnectionError(null);
+      }
+      throw new Error(formatted);
     }
+
+    setSupabaseConnectionError(null);
 
     showToast(
       'Tautan pemulihan password telah dikirim ke email Anda. Periksa kotak masuk atau folder spam.',
@@ -619,12 +712,22 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         password: newPassword,
       });
     } catch (networkErr: any) {
-      throw new Error(formatSupabaseAuthError(networkErr?.message || 'Failed to fetch'));
+      const formatted = formatSupabaseAuthError(networkErr?.message || 'Failed to fetch');
+      setSupabaseConnectionError(formatted);
+      throw new Error(formatted);
     }
 
     if (updateResult.error) {
-      throw new Error(formatSupabaseAuthError(updateResult.error.message));
+      const formatted = formatSupabaseAuthError(updateResult.error.message);
+      if (isNetworkConnectionErrorMessage(updateResult.error.message)) {
+        setSupabaseConnectionError(formatted);
+      } else {
+        setSupabaseConnectionError(null);
+      }
+      throw new Error(formatted);
     }
+
+    setSupabaseConnectionError(null);
 
     // Catat log aktivitas pembaruan password tanpa menyertakan nilai password
     if (updateResult.data?.user?.id) {
@@ -732,8 +835,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
-  const isAdmin = user?.role === 'admin';
-  const isUser = !!user && user.role !== 'admin';
+  const isAdmin = isPrivilegedAdminRole(user?.role) || Boolean(user?.is_super_admin);
+  const isUser = !!user && !isAdmin;
 
   return (
     <AuthContext.Provider
@@ -748,6 +851,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         recoveryEmail,
         recoveryLinkError,
         clearRecoveryLinkError,
+        supabaseConnectionError,
+        isCheckingConnection,
+        recheckSupabaseConnection,
         login,
         register,
         requestPasswordReset,

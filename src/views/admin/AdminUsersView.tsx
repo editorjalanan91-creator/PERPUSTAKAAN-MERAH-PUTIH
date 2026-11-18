@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Profile } from '../../types';
 import { formatDateIndo } from '../../utils/libraryRules';
-import { isVisitorArchived } from '../../utils/visitorDeletion';
+import { isAdminOrSuperAdminRole, isVisitorArchived } from '../../utils/visitorDeletion';
 import {
   Users,
   Trash2,
@@ -14,6 +14,7 @@ import {
   BookOpen,
   ShieldAlert,
   Loader2,
+  RotateCcw,
 } from 'lucide-react';
 
 export interface VisitorWithStats extends Profile {
@@ -27,18 +28,24 @@ interface AdminUsersViewProps {
   currentUserId?: string;
   onDeleteUser?: (id: string) => Promise<void>;
   onArchiveUser?: (id: string) => Promise<void>;
+  onRestoreUser?: (id: string) => Promise<void>;
 }
+
+type VisitorModalMode = 'delete' | 'archive' | 'restore';
 
 export const AdminUsersView: React.FC<AdminUsersViewProps> = ({
   users,
   currentUserId,
   onDeleteUser,
   onArchiveUser,
+  onRestoreUser,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'archived'>('all');
   const [targetUser, setTargetUser] = useState<VisitorWithStats | null>(null);
+  const [modalMode, setModalMode] = useState<VisitorModalMode>('delete');
   const [requiresArchiveFallback, setRequiresArchiveFallback] = useState(false);
+  const [blockedActiveLoansCount, setBlockedActiveLoansCount] = useState<number>(0);
   const [modalError, setModalError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -60,15 +67,34 @@ export const AdminUsersView: React.FC<AdminUsersViewProps> = ({
   });
 
   const openDeleteModal = (visitor: VisitorWithStats) => {
+    const activeLoans = visitor.activeLoans ?? 0;
+    const totalLoans = visitor.totalLoans ?? 0;
     setTargetUser(visitor);
-    setRequiresArchiveFallback((visitor.totalLoans ?? 0) > 0);
+    setBlockedActiveLoansCount(activeLoans);
+    if (totalLoans > 0 && activeLoans === 0) {
+      setModalMode('archive');
+      setRequiresArchiveFallback(true);
+    } else {
+      setModalMode('delete');
+      setRequiresArchiveFallback(false);
+    }
+    setModalError(null);
+  };
+
+  const openRestoreModal = (visitor: VisitorWithStats) => {
+    setTargetUser(visitor);
+    setModalMode('restore');
+    setRequiresArchiveFallback(false);
+    setBlockedActiveLoansCount(visitor.activeLoans ?? 0);
     setModalError(null);
   };
 
   const closeModal = () => {
     if (isSubmitting) return;
     setTargetUser(null);
+    setModalMode('delete');
     setRequiresArchiveFallback(false);
+    setBlockedActiveLoansCount(0);
     setModalError(null);
   };
 
@@ -80,8 +106,12 @@ export const AdminUsersView: React.FC<AdminUsersViewProps> = ({
       await onDeleteUser(targetUser.id);
       setTargetUser(null);
       setRequiresArchiveFallback(false);
+      setBlockedActiveLoansCount(0);
     } catch (err: any) {
-      if (err?.code === 'HAS_LOAN_HISTORY') {
+      if (err?.code === 'HAS_ACTIVE_LOANS') {
+        setBlockedActiveLoansCount(err?.activeLoans || targetUser.activeLoans || 1);
+      } else if (err?.code === 'HAS_LOAN_HISTORY') {
+        setModalMode('archive');
         setRequiresArchiveFallback(true);
       }
       setModalError(err?.message || 'Gagal menghapus akun pengunjung.');
@@ -98,17 +128,45 @@ export const AdminUsersView: React.FC<AdminUsersViewProps> = ({
       await onArchiveUser(targetUser.id);
       setTargetUser(null);
       setRequiresArchiveFallback(false);
+      setBlockedActiveLoansCount(0);
     } catch (err: any) {
+      if (err?.code === 'HAS_ACTIVE_LOANS') {
+        setBlockedActiveLoansCount(err?.activeLoans || targetUser.activeLoans || 1);
+      }
       setModalError(err?.message || 'Gagal mengarsipkan akun pengunjung.');
     } finally {
       setIsSubmitting(false);
     }
   };
 
+  const handleConfirmRestore = async () => {
+    if (!targetUser || !onRestoreUser || isSubmitting) return;
+    setIsSubmitting(true);
+    setModalError(null);
+    try {
+      await onRestoreUser(targetUser.id);
+      setTargetUser(null);
+      setModalMode('delete');
+      setRequiresArchiveFallback(false);
+      setBlockedActiveLoansCount(0);
+    } catch (err: any) {
+      setModalError(err?.message || 'Gagal mengaktifkan kembali akun pengunjung.');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
   const targetTotalLoans = targetUser?.totalLoans ?? 0;
-  const targetActiveLoans = targetUser?.activeLoans ?? 0;
+  const targetActiveLoans = Math.max(targetUser?.activeLoans ?? 0, blockedActiveLoansCount);
   const targetIsArchived = targetUser ? isVisitorArchived(targetUser) : false;
-  const isArchiveMode = Boolean(targetUser && (targetTotalLoans > 0 || requiresArchiveFallback));
+  const isRestoreMode = Boolean(targetUser && modalMode === 'restore');
+  const hasActiveLoansBlock = Boolean(targetUser && !isRestoreMode && targetActiveLoans > 0);
+  const isArchiveMode = Boolean(
+    targetUser &&
+      !isRestoreMode &&
+      !hasActiveLoansBlock &&
+      (modalMode === 'archive' || targetTotalLoans > 0 || requiresArchiveFallback)
+  );
 
   return (
     <div className="space-y-6">
@@ -194,7 +252,7 @@ export const AdminUsersView: React.FC<AdminUsersViewProps> = ({
                   <th className="py-3 px-4 font-semibold">Tanggal Registrasi</th>
                   <th className="py-3 px-4 font-semibold text-center">Pinjaman Aktif</th>
                   <th className="py-3 px-4 font-semibold text-center">Total Riwayat</th>
-                  {(onDeleteUser || onArchiveUser) && (
+                  {(onDeleteUser || onArchiveUser || onRestoreUser) && (
                     <th className="py-3 px-4 font-semibold text-right">Aksi</th>
                   )}
                 </tr>
@@ -202,7 +260,10 @@ export const AdminUsersView: React.FC<AdminUsersViewProps> = ({
               <tbody className="divide-y divide-slate-100">
                 {filteredUsers.map((u) => {
                   const archived = isVisitorArchived(u);
-                  const isSelfOrAdmin = u.role === 'admin' || (currentUserId && u.id === currentUserId);
+                  const isProtectedAccount =
+                    isAdminOrSuperAdminRole(u.role) ||
+                    u.is_super_admin === true ||
+                    Boolean(currentUserId && u.id === currentUserId);
                   return (
                     <tr
                       key={u.id}
@@ -264,24 +325,42 @@ export const AdminUsersView: React.FC<AdminUsersViewProps> = ({
                       <td className="py-3.5 px-4 text-center font-semibold text-slate-700">
                         {u.totalLoans ?? 0} transaksi
                       </td>
-                      {(onDeleteUser || onArchiveUser) && (
+                      {(onDeleteUser || onArchiveUser || onRestoreUser) && (
                         <td className="py-3.5 px-4 text-right">
-                          <button
-                            type="button"
-                            onClick={() => openDeleteModal(u)}
-                            disabled={Boolean(isSelfOrAdmin)}
-                            aria-label={`Hapus akun ${u.full_name}`}
-                            title={
-                              isSelfOrAdmin
-                                ? 'Akun administrator tidak dapat dihapus'
-                                : (u.totalLoans ?? 0) > 0
-                                  ? 'Arsipkan / Kelola Penghapusan Akun Pengunjung'
-                                  : 'Hapus Akun Pengunjung'
-                            }
-                            className="p-2 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
+                          {archived ? (
+                            onRestoreUser && (
+                              <button
+                                type="button"
+                                onClick={() => openRestoreModal(u)}
+                                disabled={Boolean(isProtectedAccount)}
+                                aria-label={`Aktifkan kembali akun ${u.full_name}`}
+                                title="Aktifkan Kembali Pengunjung"
+                                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 font-semibold text-[11px] disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer"
+                              >
+                                <RotateCcw className="w-3.5 h-3.5" />
+                                <span>Aktifkan Kembali</span>
+                              </button>
+                            )
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => openDeleteModal(u)}
+                              disabled={Boolean(isProtectedAccount)}
+                              aria-label={`Hapus akun ${u.full_name}`}
+                              title={
+                                isProtectedAccount
+                                  ? 'Akun administrator / Super Admin dilindungi dan tidak dapat dihapus'
+                                  : (u.activeLoans ?? 0) > 0
+                                    ? 'Pengunjung memiliki pinjaman aktif yang harus diselesaikan'
+                                    : (u.totalLoans ?? 0) > 0
+                                      ? 'Arsipkan / Kelola Penghapusan Akun Pengunjung'
+                                      : 'Hapus Akun Pengunjung'
+                              }
+                              className="p-2 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          )}
                         </td>
                       )}
                     </tr>
@@ -307,7 +386,7 @@ export const AdminUsersView: React.FC<AdminUsersViewProps> = ({
         )}
       </div>
 
-      {/* Modal Konfirmasi Penghapusan / Pengarsipan Pengunjung */}
+      {/* Modal Konfirmasi Penghapusan / Pengarsipan / Aktivasi Kembali Pengunjung */}
       {targetUser && (
         <div
           className="fixed inset-0 z-50 bg-slate-950/75 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto"
@@ -325,12 +404,16 @@ export const AdminUsersView: React.FC<AdminUsersViewProps> = ({
               <div className="flex items-center gap-3">
                 <div
                   className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${
-                    isArchiveMode
-                      ? 'bg-amber-500/20 text-amber-400 border border-amber-400/30'
-                      : 'bg-rose-500/20 text-rose-400 border border-rose-400/30'
+                    isRestoreMode
+                      ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-400/30'
+                      : isArchiveMode || hasActiveLoansBlock
+                        ? 'bg-amber-500/20 text-amber-400 border border-amber-400/30'
+                        : 'bg-rose-500/20 text-rose-400 border border-rose-400/30'
                   }`}
                 >
-                  {isArchiveMode ? (
+                  {isRestoreMode ? (
+                    <RotateCcw className="w-5 h-5" />
+                  ) : isArchiveMode || hasActiveLoansBlock ? (
                     <Archive className="w-5 h-5" />
                   ) : (
                     <Trash2 className="w-5 h-5" />
@@ -341,14 +424,22 @@ export const AdminUsersView: React.FC<AdminUsersViewProps> = ({
                     id="visitor-delete-modal-title"
                     className="text-base font-bold text-white font-brand"
                   >
-                    {isArchiveMode
-                      ? 'Nonaktifkan & Arsipkan Akun Pengunjung'
-                      : 'Konfirmasi Hapus Akun Pengunjung'}
+                    {isRestoreMode
+                      ? 'Aktifkan Kembali Akun Pengunjung'
+                      : hasActiveLoansBlock
+                        ? 'Akun Masih Memiliki Pinjaman Aktif'
+                        : isArchiveMode
+                          ? 'Nonaktifkan & Arsipkan Akun Pengunjung'
+                          : 'Konfirmasi Hapus Akun Pengunjung'}
                   </h3>
                   <p className="text-[11px] text-slate-400">
-                    {isArchiveMode
-                      ? 'Akun memiliki riwayat peminjaman yang wajib dijaga'
-                      : 'Penghapusan permanen dari Supabase Auth & database'}
+                    {isRestoreMode
+                      ? 'Memulihkan akses login pengunjung tanpa mengubah riwayat transaksi'
+                      : hasActiveLoansBlock
+                        ? 'Penghapusan maupun pengarsipan ditolak sampai peminjaman selesai'
+                        : isArchiveMode
+                          ? 'Akun memiliki riwayat peminjaman yang wajib dijaga'
+                          : 'Penghapusan permanen dari Supabase Auth & database'}
                   </p>
                 </div>
               </div>
@@ -382,7 +473,7 @@ export const AdminUsersView: React.FC<AdminUsersViewProps> = ({
                         : 'bg-blue-900 text-amber-300'
                     }`}
                   >
-                    {targetIsArchived ? 'Sudah Diarsipkan' : 'Anggota Aktif'}
+                    {targetIsArchived ? 'Diarsipkan' : 'Anggota Aktif'}
                   </span>
                 </div>
 
@@ -415,8 +506,37 @@ export const AdminUsersView: React.FC<AdminUsersViewProps> = ({
                 </div>
               </div>
 
-              {/* Warning Box */}
-              {isArchiveMode ? (
+              {/* Warning / Info Box */}
+              {isRestoreMode ? (
+                <div className="rounded-xl bg-emerald-50 border border-emerald-200 p-3.5 flex items-start gap-3">
+                  <RotateCcw className="w-5 h-5 text-emerald-700 shrink-0 mt-0.5" />
+                  <div className="text-xs text-emerald-950 space-y-1">
+                    <p className="font-bold">Konfirmasi Aktivasi Ulang Akun Pengunjung</p>
+                    <p className="leading-relaxed text-emerald-900">
+                      Akun pengunjung ini akan diaktifkan kembali pada{' '}
+                      <strong>Supabase Auth</strong> dan <strong>public.profiles</strong> sehingga
+                      dapat login serta meminjam buku kembali tanpa mengubah riwayat transaksi yang
+                      sudah tercatat.
+                    </p>
+                  </div>
+                </div>
+              ) : hasActiveLoansBlock ? (
+                <div className="rounded-xl bg-amber-50 border border-amber-300 p-3.5 flex items-start gap-3">
+                  <AlertTriangle className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
+                  <div className="text-xs text-amber-950 space-y-1">
+                    <p className="font-bold">
+                      Penghapusan dan pengarsipan ditolak sementara
+                    </p>
+                    <p className="leading-relaxed text-amber-900">
+                      Pengunjung ini masih memiliki{' '}
+                      <strong>{targetActiveLoans} peminjaman aktif atau menunggu persetujuan</strong>
+                      . Selesaikan seluruh transaksi peminjaman melalui menu{' '}
+                      <strong>Peminjaman Buku</strong> terlebih dahulu sebelum menghapus atau
+                      mengarsipkan akun ini.
+                    </p>
+                  </div>
+                </div>
+              ) : isArchiveMode ? (
                 <div className="rounded-xl bg-amber-50 border border-amber-200 p-3.5 flex items-start gap-3">
                   <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
                   <div className="text-xs text-amber-950 space-y-1">
@@ -428,7 +548,7 @@ export const AdminUsersView: React.FC<AdminUsersViewProps> = ({
                       <strong>{targetTotalLoans} riwayat peminjaman</strong>. Untuk menjaga
                       integritas data transaksi dan laporan bulanan perpustakaan, akun tidak
                       dihapus secara permanen, melainkan dapat{' '}
-                      <strong>diarsipkan / dinonaktifkan</strong> agar tidak bisa login kembali.
+                      <strong>diarsipkan</strong> agar tidak bisa login kembali.
                     </p>
                   </div>
                 </div>
@@ -437,7 +557,7 @@ export const AdminUsersView: React.FC<AdminUsersViewProps> = ({
                   <ShieldAlert className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
                   <div className="text-xs text-rose-950 space-y-1">
                     <p className="font-bold">
-                      Peringatan: Tindakan ini akan memengaruhi akun secara permanen
+                      Peringatan: Penghapusan bersifat permanen
                     </p>
                     <p className="leading-relaxed text-rose-900">
                       Akun autentikasi di <strong>Supabase Auth</strong> dan data profil pada{' '}
@@ -469,7 +589,28 @@ export const AdminUsersView: React.FC<AdminUsersViewProps> = ({
                   Batal
                 </button>
 
-                {isArchiveMode ? (
+                {isRestoreMode ? (
+                  onRestoreUser && (
+                    <button
+                      type="button"
+                      onClick={handleConfirmRestore}
+                      disabled={isSubmitting}
+                      className="w-full sm:w-auto px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs shadow-sm disabled:opacity-60 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2 cursor-pointer"
+                    >
+                      {isSubmitting ? (
+                        <>
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          <span>Mengaktifkan...</span>
+                        </>
+                      ) : (
+                        <>
+                          <RotateCcw className="w-3.5 h-3.5" />
+                          <span>Aktifkan Kembali</span>
+                        </>
+                      )}
+                    </button>
+                  )
+                ) : hasActiveLoansBlock ? null : isArchiveMode ? (
                   onArchiveUser && (
                     <button
                       type="button"
@@ -487,7 +628,7 @@ export const AdminUsersView: React.FC<AdminUsersViewProps> = ({
                       ) : (
                         <>
                           <Archive className="w-3.5 h-3.5" />
-                          <span>Arsipkan / Nonaktifkan Akun</span>
+                          <span>Arsipkan Pengunjung</span>
                         </>
                       )}
                     </button>
@@ -508,7 +649,7 @@ export const AdminUsersView: React.FC<AdminUsersViewProps> = ({
                       ) : (
                         <>
                           <Trash2 className="w-3.5 h-3.5" />
-                          <span>Hapus Pengunjung</span>
+                          <span>Hapus Permanen</span>
                         </>
                       )}
                     </button>
@@ -522,3 +663,4 @@ export const AdminUsersView: React.FC<AdminUsersViewProps> = ({
     </div>
   );
 };
+

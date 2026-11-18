@@ -1,5 +1,10 @@
 import { supabase, recordActivityLog } from './supabaseClient';
 import { Book, Category, Loan, Profile, ActivityLog } from '../types';
+import {
+  computeBookStockAfterReturn,
+  evaluateLoanReturnEligibility,
+  formatBookReturnErrorMessage,
+} from '../utils/libraryRules';
 
 /**
  * Service Layer untuk seluruh interaksi Supabase Database, Storage, dan Realtime
@@ -69,8 +74,8 @@ export const libraryService = {
 
     if (error) throw error;
 
-    if (userId) {
-      await recordActivityLog(userId, 'create_category', 'categories', data.id, { name });
+    if (creatorId) {
+      await recordActivityLog(creatorId, 'create_category', 'categories', data.id, { name });
     }
 
     return data;
@@ -163,8 +168,13 @@ export const libraryService = {
     bookData: Partial<Book> & { title: string },
     userId?: string
   ): Promise<Book> {
-    const totalCopies = Math.max(1, bookData.total_copies || bookData.stock || 1);
-    const availableCopies = bookData.available_copies !== undefined ? bookData.available_copies : totalCopies;
+    const totalCopies = Math.max(1, Math.floor(Number(bookData.total_copies || bookData.stock || 1) || 1));
+    const rawAvailable =
+      bookData.available_copies !== undefined ? Number(bookData.available_copies) : totalCopies;
+    const availableCopies = Math.max(
+      0,
+      Math.min(totalCopies, Number.isFinite(rawAvailable) ? Math.floor(rawAvailable) : totalCopies)
+    );
 
     const { data, error } = await supabase
       .from('books')
@@ -332,20 +342,28 @@ export const libraryService = {
       throw new Error('Buku tidak ditemukan.');
     }
 
+    if (!book.is_published || book.is_archived) {
+      throw new Error('Maaf, buku ini sedang diarsipkan atau belum dipublikasikan untuk dipinjam.');
+    }
+
     if (book.available_copies <= 0) {
       throw new Error('Maaf, eksemplar buku ini sedang tidak tersedia.');
     }
 
     // 2. Periksa apakah pengunjung sudah memiliki pinjaman aktif / pending untuk buku yang sama
-    const { data: existingLoan } = await supabase
+    const { data: existingLoans, error: existingErr } = await supabase
       .from('loans')
       .select('id, status')
       .eq('user_id', userId)
       .eq('book_id', bookId)
       .in('status', ['pending', 'approved', 'borrowed'])
-      .maybeSingle();
+      .limit(1);
 
-    if (existingLoan) {
+    if (existingErr) {
+      throw new Error('Gagal memeriksa status peminjaman sebelumnya. Silakan coba kembali.');
+    }
+
+    if (existingLoans && existingLoans.length > 0) {
       throw new Error('Anda sudah memiliki permintaan atau peminjaman aktif untuk buku ini.');
     }
 
@@ -358,7 +376,7 @@ export const libraryService = {
         book_id: bookId,
         status: 'pending',
         requested_at: requestedAt,
-        admin_note: notes ? `Catatan peminjam: ${notes}` : null,
+        admin_note: finalNotes && finalNotes.trim() ? `Catatan peminjam: ${finalNotes.trim()}` : null,
       })
       .select(`
         *,
@@ -383,8 +401,34 @@ export const libraryService = {
     adminNote?: string,
     adminId?: string
   ): Promise<Loan> {
+    const { data: existingLoan, error: checkErr } = await supabase
+      .from('loans')
+      .select('id, status, book_id')
+      .eq('id', loanId)
+      .maybeSingle();
+
+    if (checkErr) throw checkErr;
+    if (!existingLoan) {
+      throw new Error('Data transaksi peminjaman tidak ditemukan.');
+    }
+    if (existingLoan.status !== 'pending') {
+      throw new Error('Permintaan peminjaman ini sudah diproses sebelumnya dan tidak dapat disetujui ulang.');
+    }
+
+    const { data: targetBook, error: bookErr } = await supabase
+      .from('books')
+      .select('id, available_copies, is_archived')
+      .eq('id', existingLoan.book_id)
+      .maybeSingle();
+
+    if (bookErr) throw bookErr;
+    if (!targetBook || targetBook.is_archived || (targetBook.available_copies ?? 0) <= 0) {
+      throw new Error('Stok eksemplar buku sudah habis atau buku diarsipkan sehingga peminjaman tidak dapat disetujui.');
+    }
+
+    const safeDurationDays = Math.max(1, Math.min(90, Math.floor(Number(durationDays) || 7)));
     const approvedAt = new Date();
-    const dueAt = new Date(approvedAt.getTime() + durationDays * 24 * 60 * 60 * 1000);
+    const dueAt = new Date(approvedAt.getTime() + safeDurationDays * 24 * 60 * 60 * 1000);
 
     const { data, error } = await supabase
       .from('loans')
@@ -392,10 +436,11 @@ export const libraryService = {
         status: 'approved',
         approved_at: approvedAt.toISOString(),
         due_at: dueAt.toISOString(),
-        admin_note: adminNote || 'Peminjaman telah disetujui administrator perpustakaan.',
+        admin_note: (adminNote || '').trim() || 'Peminjaman telah disetujui administrator perpustakaan.',
         updated_at: new Date().toISOString(),
       })
       .eq('id', loanId)
+      .eq('status', 'pending')
       .select(`
         *,
         book:books (id, title, author, cover_path, file_path),
@@ -403,11 +448,16 @@ export const libraryService = {
       `)
       .single();
 
-    if (error) throw error;
+    if (error) {
+      if (error.code === 'PGRST116') {
+        throw new Error('Permintaan peminjaman ini sudah diproses oleh admin lain.');
+      }
+      throw error;
+    }
 
     if (adminId) {
       await recordActivityLog(adminId, 'approve_loan', 'loans', loanId, {
-        duration_days: durationDays,
+        duration_days: safeDurationDays,
         due_at: dueAt.toISOString(),
       });
     }
@@ -420,14 +470,30 @@ export const libraryService = {
    * Status -> 'rejected'
    */
   async rejectLoan(loanId: string, reason = 'Permintaan peminjaman belum dapat disetujui saat ini.', adminId?: string): Promise<Loan> {
+    const { data: existingLoan, error: checkErr } = await supabase
+      .from('loans')
+      .select('id, status')
+      .eq('id', loanId)
+      .maybeSingle();
+
+    if (checkErr) throw checkErr;
+    if (!existingLoan) {
+      throw new Error('Data transaksi peminjaman tidak ditemukan.');
+    }
+    if (existingLoan.status !== 'pending') {
+      throw new Error('Permintaan peminjaman ini sudah diproses sebelumnya.');
+    }
+
+    const cleanReason = reason.trim() || 'Permintaan peminjaman belum dapat disetujui saat ini.';
     const { data, error } = await supabase
       .from('loans')
       .update({
         status: 'rejected',
-        admin_note: reason,
+        admin_note: cleanReason,
         updated_at: new Date().toISOString(),
       })
       .eq('id', loanId)
+      .eq('status', 'pending')
       .select(`
         *,
         book:books (id, title, author, cover_path),
@@ -435,10 +501,15 @@ export const libraryService = {
       `)
       .single();
 
-    if (error) throw error;
+    if (error) {
+      if (error.code === 'PGRST116') {
+        throw new Error('Permintaan peminjaman ini sudah diproses oleh admin lain.');
+      }
+      throw error;
+    }
 
     if (adminId) {
-      await recordActivityLog(adminId, 'reject_loan', 'loans', loanId, { reason });
+      await recordActivityLog(adminId, 'reject_loan', 'loans', loanId, { reason: cleanReason });
     }
 
     return data;
@@ -446,33 +517,233 @@ export const libraryService = {
 
   /**
    * Konfirmasi pengembalian buku:
-   * Status -> 'returned', set returned_at
+   * - Menggunakan primary key transaksi (loans.id)
+   * - Mengutamakan endpoint server terverifikasi /api/loans/:id/return agar bebas bug RLS .single() ("Cannot coerce...")
+   * - Fallback client-side tidak memakai .single() pada UPDATE, memvalidasi status, & mencegah penggandaan stok
    */
   async returnLoan(loanId: string, actorId?: string): Promise<Loan> {
-    const returnedAt = new Date().toISOString();
+    const cleanLoanId = String(loanId || '').trim();
+    if (!cleanLoanId) {
+      throw new Error('ID transaksi peminjaman tidak valid.');
+    }
 
-    const { data, error } = await supabase
+    // 1. Jalur utama: backend resmi (/api/loans/:id/return) dengan token sesi terverifikasi
+    try {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+
+      if (session?.access_token) {
+        const response = await fetch(`/api/loans/${encodeURIComponent(cleanLoanId)}/return`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${session.access_token}`,
+          },
+        });
+
+        const contentType = response.headers.get('content-type') || '';
+        if (contentType.includes('application/json')) {
+          const payload = await response.json().catch(() => ({}));
+          if (response.ok && payload?.loan) {
+            return payload.loan as Loan;
+          }
+
+          // Jika API resmi tersedia dan mengembalikan error bisnis/otorisasi/DB (kecuali 404 route tidak ada),
+          // lempar error informatif tanpa melakukan update ganda.
+          const err: any = new Error(
+            payload?.error || `Gagal mengonfirmasi pengembalian buku (HTTP ${response.status}).`
+          );
+          err.code = payload?.code;
+          err.status = response.status;
+          throw err;
+        }
+      }
+    } catch (apiErr: any) {
+      // Jika error berasal dari respons JSON resmi endpoint /api/loans/:id/return, teruskan ke pemanggil.
+      if (apiErr?.status !== undefined || apiErr?.code !== undefined) {
+        throw apiErr;
+      }
+      // Jika jaringan/endpoint tidak tersedia (misal mode statis lokal), lanjutkan ke fallback client yang aman.
+    }
+
+    // 2. Fallback client-side aman (tanpa .single() pada UPDATE agar tidak memicu PGRST116)
+    console.warn('[RETURN_BOOK_CLIENT_FALLBACK]', { loanId: cleanLoanId });
+
+    const { data: existingRows, error: fetchError } = await supabase
+      .from('loans')
+      .select(
+        'id, user_id, book_id, status, requested_at, approved_at, due_at, returned_at, admin_note, created_at, updated_at'
+      )
+      .eq('id', cleanLoanId)
+      .limit(2);
+
+    if (fetchError) {
+      throw new Error(formatBookReturnErrorMessage(fetchError));
+    }
+
+    if (existingRows && existingRows.length > 1) {
+      console.error('[RETURN_BOOK_CLIENT_MULTIPLE_RECORDS]', {
+        query: 'fallback.loans_select_by_pk',
+        loanId: cleanLoanId,
+        rowCount: existingRows.length,
+      });
+      throw new Error('Terdeteksi duplikasi data pada transaksi peminjaman ini. Hubungi administrator perpustakaan.');
+    }
+
+    const existingLoan = existingRows?.[0];
+    if (!existingLoan) {
+      throw new Error('Data transaksi peminjaman tidak ditemukan atau Anda tidak memiliki akses.');
+    }
+
+    const fetchRelations = async (loanRow: any): Promise<Loan> => {
+      const [{ data: bookRows }, { data: profileRows }] = await Promise.all([
+        supabase
+          .from('books')
+          .select('id, title, author, cover_path, file_path, file_type, total_copies, available_copies')
+          .eq('id', loanRow.book_id)
+          .limit(2),
+        supabase
+          .from('profiles')
+          .select('id, full_name, username')
+          .eq('id', loanRow.user_id)
+          .limit(2),
+      ]);
+
+      if (bookRows && bookRows.length > 1) {
+        console.error('[RETURN_BOOK_CLIENT_MULTIPLE_RECORDS]', {
+          query: 'fallback.fetchRelations.books',
+          loanId: cleanLoanId,
+          rowCount: bookRows.length,
+        });
+      }
+      if (profileRows && profileRows.length > 1) {
+        console.error('[RETURN_BOOK_CLIENT_MULTIPLE_RECORDS]', {
+          query: 'fallback.fetchRelations.profiles',
+          loanId: cleanLoanId,
+          rowCount: profileRows.length,
+        });
+      }
+
+      return {
+        ...loanRow,
+        book: bookRows?.[0] ?? undefined,
+        profile: profileRows?.[0] ?? undefined,
+      } as Loan;
+    };
+
+    const eligibility = evaluateLoanReturnEligibility(existingLoan.status);
+    if (!eligibility.eligible) {
+      if (eligibility.reason === 'already_returned') {
+        return fetchRelations(existingLoan);
+      }
+      const statusErr: any = new Error(eligibility.message);
+      statusErr.code = 'INVALID_LOAN_STATUS';
+      throw statusErr;
+    }
+
+    const { data: beforeBookRows } = await supabase
+      .from('books')
+      .select('id, available_copies, total_copies')
+      .eq('id', existingLoan.book_id)
+      .limit(2);
+
+    if (beforeBookRows && beforeBookRows.length > 1) {
+      console.error('[RETURN_BOOK_CLIENT_MULTIPLE_RECORDS]', {
+        query: 'fallback.beforeBook',
+        loanId: cleanLoanId,
+        rowCount: beforeBookRows.length,
+      });
+      throw new Error('Terdeteksi duplikasi data buku pada transaksi ini. Hubungi administrator perpustakaan.');
+    }
+
+    const beforeBook = beforeBookRows?.[0] ?? null;
+    const beforeAvailable = Number(beforeBook?.available_copies ?? 0);
+    const totalCopies = Number(beforeBook?.total_copies ?? 0);
+
+    const returnedAt = new Date().toISOString();
+    const { data: updatedRows, error: updateError } = await supabase
       .from('loans')
       .update({
         status: 'returned',
         returned_at: returnedAt,
         updated_at: returnedAt,
       })
-      .eq('id', loanId)
-      .select(`
-        *,
-        book:books (id, title, author, cover_path),
-        profile:profiles (id, full_name, username)
-      `)
-      .single();
+      .eq('id', cleanLoanId)
+      .in('status', ['approved', 'borrowed'])
+      .select(
+        'id, user_id, book_id, status, requested_at, approved_at, due_at, returned_at, admin_note, created_at, updated_at'
+      );
 
-    if (error) throw error;
-
-    if (actorId) {
-      await recordActivityLog(actorId, 'return_loan', 'loans', loanId);
+    if (updateError) {
+      const wrappedErr: any = new Error(formatBookReturnErrorMessage(updateError));
+      wrappedErr.code = updateError.code;
+      wrappedErr.details = updateError.details;
+      throw wrappedErr;
     }
 
-    return data;
+    if (!updatedRows || updatedRows.length === 0) {
+      const { data: recheckRows } = await supabase
+        .from('loans')
+        .select(
+          'id, user_id, book_id, status, requested_at, approved_at, due_at, returned_at, admin_note, created_at, updated_at'
+        )
+        .eq('id', cleanLoanId)
+        .limit(2);
+
+      const latestLoan = recheckRows?.[0];
+      if (latestLoan?.status === 'returned') {
+        return fetchRelations(latestLoan);
+      }
+
+      const rlsErr: any = new Error(
+        'Permintaan pengembalian belum dapat diterapkan oleh database. Periksa izin akun atau hubungi administrator perpustakaan.'
+      );
+      rlsErr.code = 'ZERO_ROWS_UPDATED';
+      throw rlsErr;
+    }
+
+    if (updatedRows.length > 1) {
+      console.error('[RETURN_BOOK_CLIENT_MULTIPLE_RECORDS]', {
+        query: 'fallback.loans_update_by_pk',
+        loanId: cleanLoanId,
+        rowCount: updatedRows.length,
+      });
+      throw new Error('Terdeteksi duplikasi transaksi saat menyimpan pengembalian. Hubungi administrator perpustakaan.');
+    }
+
+    const updatedLoan = updatedRows[0];
+
+    if (beforeBook) {
+      const { data: afterBookRows } = await supabase
+        .from('books')
+        .select('id, available_copies, total_copies')
+        .eq('id', existingLoan.book_id)
+        .limit(2);
+      const afterBook = afterBookRows?.[0] ?? beforeBook;
+      const stockPlan = computeBookStockAfterReturn({
+        beforeAvailable,
+        afterAvailable: Number(afterBook.available_copies ?? beforeAvailable),
+        totalCopies: Number(afterBook.total_copies ?? totalCopies),
+      });
+
+      if (stockPlan.needsUpdate) {
+        await supabase
+          .from('books')
+          .update({
+            available_copies: stockPlan.targetAvailable,
+            updated_at: returnedAt,
+          })
+          .eq('id', existingLoan.book_id)
+          .eq('available_copies', stockPlan.safeAfter);
+      }
+    }
+
+    if (actorId) {
+      await recordActivityLog(actorId, 'return_loan', 'loans', cleanLoanId);
+    }
+
+    return fetchRelations(updatedLoan);
   },
 
   // ==========================================
@@ -483,6 +754,7 @@ export const libraryService = {
       .from('profiles')
       .select('*')
       .neq('role', 'admin')
+      .neq('role', 'super_admin')
       .order('created_at', { ascending: false });
 
     if (error) {
@@ -490,7 +762,9 @@ export const libraryService = {
       throw error;
     }
 
-    const baseVisitors: Profile[] = profilesData || [];
+    const baseVisitors: Profile[] = (profilesData || []).filter(
+      (p: any) => p.role !== 'admin' && p.role !== 'super_admin' && p.is_super_admin !== true
+    );
 
     // Coba perkaya data dengan email & status arsip dari endpoint admin server-side
     try {
@@ -543,6 +817,7 @@ export const libraryService = {
       );
       err.code = payload?.code;
       err.totalLoans = payload?.totalLoans;
+      err.activeLoans = payload?.activeLoans;
       err.status = response.status;
       throw err;
     }
@@ -576,6 +851,7 @@ export const libraryService = {
         payload?.error || `Gagal mengarsipkan akun pengunjung (HTTP ${response.status}).`
       );
       err.code = payload?.code;
+      err.activeLoans = payload?.activeLoans;
       err.status = response.status;
       throw err;
     }
@@ -584,6 +860,40 @@ export const libraryService = {
       mode: 'archived',
       archivedAt: payload?.archivedAt,
       message: payload?.message || 'Akun pengunjung berhasil diarsipkan dan dinonaktifkan.',
+    };
+  },
+
+  async restoreVisitor(id: string): Promise<{ mode: 'restored'; restoredAt?: string; message: string }> {
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
+
+    if (!session?.access_token) {
+      throw new Error('Sesi administrator tidak ditemukan. Silakan login kembali.');
+    }
+
+    const response = await fetch(`/api/admin/visitors/${encodeURIComponent(id)}/restore`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${session.access_token}`,
+      },
+    });
+
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const err: any = new Error(
+        payload?.error || `Gagal mengaktifkan kembali akun pengunjung (HTTP ${response.status}).`
+      );
+      err.code = payload?.code;
+      err.status = response.status;
+      throw err;
+    }
+
+    return {
+      mode: 'restored',
+      restoredAt: payload?.restoredAt,
+      message: payload?.message || 'Akun pengunjung berhasil diaktifkan kembali.',
     };
   },
 

@@ -24,6 +24,7 @@ export const AdminCategoriesView: React.FC<AdminCategoriesViewProps> = ({
   const [isActive, setIsActive] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const openCreateModal = () => {
     setEditingCategory(null);
@@ -66,11 +67,12 @@ export const AdminCategoriesView: React.FC<AdminCategoriesViewProps> = ({
   const handleDelete = async () => {
     if (!deletingCategory) return;
     setIsSubmitting(true);
+    setDeleteError(null);
     try {
       await onDeleteCategory(deletingCategory.id);
       setDeletingCategory(null);
     } catch (err: any) {
-      alert(`Gagal menghapus kategori: ${err.message}`);
+      setDeleteError(err?.message || 'Gagal menghapus kategori buku.');
     } finally {
       setIsSubmitting(false);
     }
@@ -158,7 +160,10 @@ export const AdminCategoriesView: React.FC<AdminCategoriesViewProps> = ({
                         <Edit2 className="w-3.5 h-3.5" />
                       </button>
                       <button
-                        onClick={() => setDeletingCategory(cat)}
+                        onClick={() => {
+                          setDeleteError(null);
+                          setDeletingCategory(cat);
+                        }}
                         className="p-1.5 rounded-lg text-slate-600 hover:text-rose-600 hover:bg-rose-50 transition-colors"
                         title="Hapus Kategori"
                       >
@@ -269,9 +274,18 @@ export const AdminCategoriesView: React.FC<AdminCategoriesViewProps> = ({
                 Apakah Anda yakin ingin menghapus kategori <strong>"{deletingCategory.name}"</strong>?
               </p>
             </div>
+            {deleteError && (
+              <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs text-left flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+                <span>{deleteError}</span>
+              </div>
+            )}
             <div className="flex gap-2 justify-center pt-2">
               <button
-                onClick={() => setDeletingCategory(null)}
+                onClick={() => {
+                  setDeleteError(null);
+                  setDeletingCategory(null);
+                }}
                 className="px-4 py-2 rounded-xl bg-slate-100 text-slate-700 font-semibold text-xs"
               >
                 Batal

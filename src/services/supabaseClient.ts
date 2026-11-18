@@ -1,5 +1,6 @@
 import { createClient, type AuthChangeEvent, type Session } from '@supabase/supabase-js';
 import { parseAuthCallbackUrl, type AuthCallbackParseResult } from '../utils/authRecovery';
+import { validateBookDocumentFile, validateCoverFile } from '../utils/libraryRules';
 
 const rawSupabaseUrl = import.meta.env.VITE_SUPABASE_URL ?? '';
 const rawSupabaseKey =
@@ -21,17 +22,55 @@ export const ADMIN_EMAIL = sanitizeEnvValue(rawAdminEmail) || 'admin@perpustakaa
 export const PRODUCTION_APP_URL = 'https://perpustakaan-merah-putih.vercel.app';
 export const RESET_PASSWORD_REDIRECT_URL = `${PRODUCTION_APP_URL}/reset-password`;
 
+function isServiceRoleKeyAccidentallyExposed(key: string): boolean {
+  if (!key) return false;
+  if (key.startsWith('sb_secret_')) return true;
+  const parts = key.split('.');
+  if (parts.length === 3 && parts[1]) {
+    try {
+      const base64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+      const padded = base64.padEnd(base64.length + ((4 - (base64.length % 4)) % 4), '=');
+      const decoded =
+        typeof atob === 'function'
+          ? atob(padded)
+          : typeof Buffer !== 'undefined'
+            ? Buffer.from(padded, 'base64').toString('utf8')
+            : '';
+      if (!decoded) return false;
+      const payload = JSON.parse(decoded) as Record<string, unknown>;
+      return payload?.role === 'service_role';
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
 export const isSupabaseUrlValid =
   /^https?:\/\/[a-z0-9.-]+(:\d+)?(\/.*)?$/i.test(supabaseUrl) &&
   !supabaseUrl.includes('your-project-ref') &&
   !supabaseUrl.includes('placeholder');
 
+export const isFrontendKeyMisconfiguredSecret = isServiceRoleKeyAccidentallyExposed(
+  supabasePublishableKey
+);
+
 export const isSupabaseKeyValid =
   supabasePublishableKey.length > 20 &&
   !supabasePublishableKey.includes('your-anon-or-publishable-key') &&
-  !supabasePublishableKey.includes('your-supabase-publishable');
+  !supabasePublishableKey.includes('your-supabase-publishable') &&
+  !isFrontendKeyMisconfiguredSecret;
 
 export const isSupabaseConfigured = isSupabaseUrlValid && isSupabaseKeyValid;
+
+export function getSupabaseHostLabel(): string | null {
+  if (!isSupabaseUrlValid) return null;
+  try {
+    return new URL(supabaseUrl).hostname;
+  } catch {
+    return null;
+  }
+}
 
 export function getSupabaseConfigError(): string | null {
   if (!supabaseUrl) {
@@ -40,10 +79,105 @@ export function getSupabaseConfigError(): string | null {
   if (!supabaseUrlValidSafe(supabaseUrl)) {
     return 'Format VITE_SUPABASE_URL tidak valid. Pastikan menggunakan URL project Supabase yang benar (contoh: https://xxxx.supabase.co) tanpa tanda kutip.';
   }
+  if (isFrontendKeyMisconfiguredSecret) {
+    return 'Konfigurasi keamanan tidak valid: VITE_SUPABASE_PUBLISHABLE_KEY terdeteksi menggunakan Secret / Service Role Key. Kunci rahasia hanya boleh dipasang di SUPABASE_SERVICE_ROLE_KEY (server).';
+  }
   if (!supabasePublishableKey || !isSupabaseKeyValid) {
     return 'Konfigurasi VITE_SUPABASE_PUBLISHABLE_KEY belum diatur atau masih menggunakan nilai contoh. Salin Publishable / Anon Key dari Supabase Dashboard > Project Settings > API.';
   }
   return null;
+}
+
+export interface BrowserSupabaseProbeResult {
+  ok: boolean;
+  kind: 'ok' | 'config' | 'auth_key' | 'network' | 'http_error';
+  status?: number;
+  host: string | null;
+  error: string | null;
+}
+
+/**
+ * Menguji koneksi aktual dari browser ke endpoint Supabase Auth (/auth/v1/settings)
+ * tanpa membaca cache/localStorage agar status koneksi selalu real-time.
+ */
+export async function probeBrowserSupabaseConnection(
+  timeoutMs = 8000
+): Promise<BrowserSupabaseProbeResult> {
+  const host = getSupabaseHostLabel();
+  const configErr = getSupabaseConfigError();
+  if (configErr) {
+    return {
+      ok: false,
+      kind: 'config',
+      host,
+      error: configErr,
+    };
+  }
+
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timeoutId =
+    controller && typeof setTimeout === 'function'
+      ? setTimeout(() => controller.abort(), timeoutMs)
+      : null;
+
+  try {
+    const response = await fetch(`${supabaseUrl}/auth/v1/settings`, {
+      method: 'GET',
+      cache: 'no-store',
+      headers: {
+        apikey: supabasePublishableKey,
+      },
+      ...(controller ? { signal: controller.signal } : {}),
+    });
+
+    if (response.status === 401 || response.status === 403) {
+      return {
+        ok: false,
+        kind: 'auth_key',
+        status: response.status,
+        host,
+        error: `Publishable / Anon Key pada VITE_SUPABASE_PUBLISHABLE_KEY ditolak oleh server Supabase${host ? ` (${host})` : ''} (HTTP ${response.status}). Pastikan key berasal dari project Supabase yang sama.`,
+      };
+    }
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        kind: 'http_error',
+        status: response.status,
+        host,
+        error: `Server Supabase${host ? ` (${host})` : ''} merespons dengan status HTTP ${response.status}. Periksa status project di Supabase Dashboard.`,
+      };
+    }
+
+    return {
+      ok: true,
+      kind: 'ok',
+      status: response.status,
+      host,
+      error: null,
+    };
+  } catch (err: any) {
+    const isAbort = err?.name === 'AbortError';
+    const targetInfo = host ? ` ke host "${host}"` : '';
+    const offlineHint =
+      typeof navigator !== 'undefined' && navigator.onLine === false
+        ? ' Browser terdeteksi sedang offline.'
+        : '';
+
+    return {
+      ok: false,
+      kind: 'network',
+      host,
+      error: isAbort
+        ? `Koneksi browser ke server Supabase${targetInfo} melebihi batas waktu (timeout). Periksa jaringan atau status project Supabase.`
+        : `Gagal terhubung ke server Supabase${targetInfo} (Failed to fetch).${offlineHint} Periksa URL VITE_SUPABASE_URL, resolusi DNS, CORS/CSP, dan pastikan build terbaru sudah terpasang.`,
+    };
+  } finally {
+    if (timeoutId !== null) {
+      clearTimeout(timeoutId);
+    }
+  }
 }
 
 function supabaseUrlValidSafe(url: string): boolean {
@@ -211,7 +345,12 @@ export async function getBookFileSignedUrl(
  * Unggah foto sampul buku ke bucket public 'book-covers'
  */
 export async function uploadBookCover(file: File): Promise<string> {
-  const fileExt = file.name.split('.').pop();
+  const validation = validateCoverFile(file);
+  if (!validation.valid) {
+    throw new Error(validation.error || 'Berkas foto sampul tidak valid.');
+  }
+
+  const fileExt = (file.name.split('.').pop() || 'jpg').toLowerCase();
   const fileName = `${Date.now()}-${Math.random().toString(36).substring(2, 8)}.${fileExt}`;
   const filePath = `covers/${fileName}`;
 
@@ -233,9 +372,13 @@ export async function uploadBookCover(file: File): Promise<string> {
  * Unggah file buku (PDF / EPUB) ke bucket private 'book-files'
  */
 export async function uploadBookFile(file: File): Promise<{ filePath: string; fileType: 'pdf' | 'epub' }> {
-  const ext = file.name.split('.').pop()?.toLowerCase();
-  const fileType: 'pdf' | 'epub' = ext === 'epub' ? 'epub' : 'pdf';
-  const fileName = `${Date.now()}-${Math.random().toString(36).substring(2, 8)}.${ext}`;
+  const validation = validateBookDocumentFile(file);
+  if (!validation.valid || !validation.fileType) {
+    throw new Error(validation.error || 'Berkas dokumen buku tidak valid.');
+  }
+
+  const fileType = validation.fileType;
+  const fileName = `${Date.now()}-${Math.random().toString(36).substring(2, 8)}.${fileType}`;
   const filePath = `documents/${fileName}`;
 
   const { error } = await supabase.storage

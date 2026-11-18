@@ -1,4 +1,4 @@
-export type UserRole = 'admin' | 'visitor' | 'user';
+export type UserRole = 'super_admin' | 'admin' | 'visitor' | 'user';
 
 export interface Profile {
   id: string;
@@ -7,7 +7,9 @@ export interface Profile {
   role: UserRole;
   email?: string;
   is_active?: boolean;
+  is_super_admin?: boolean;
   archived_at?: string | null;
+  archived_by?: string | null;
   created_at?: string;
   updated_at?: string;
 }
@@ -103,7 +105,7 @@ export interface Loan {
 
 export interface ActivityLog {
   id: string;
-  actor_id: string;
+  actor_id: string | null;
   action: string;
   entity_type: string;
   entity_id?: string | null;

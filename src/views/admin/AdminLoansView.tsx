@@ -41,11 +41,18 @@ export const AdminLoansView: React.FC<AdminLoansViewProps> = ({
   const [rejectingLoan, setRejectingLoan] = useState<Loan | null>(null);
   const [rejectReason, setRejectReason] = useState<string>('');
 
+  const [returningLoan, setReturningLoan] = useState<Loan | null>(null);
+  const [modalError, setModalError] = useState<string | null>(null);
+
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const filteredLoans = useMemo(() => {
     return loans.filter((l) => {
-      const matchStatus = statusFilter === 'all' || l.status === statusFilter;
+      const matchStatus =
+        statusFilter === 'all' ||
+        (statusFilter === 'approved'
+          ? l.status === 'approved' || l.status === 'borrowed'
+          : l.status === statusFilter);
       const q = searchQuery.toLowerCase().trim();
       const matchQuery =
         !q ||
@@ -60,13 +67,14 @@ export const AdminLoansView: React.FC<AdminLoansViewProps> = ({
 
   const handleConfirmApprove = async () => {
     if (!approvingLoan) return;
+    setModalError(null);
     setIsSubmitting(true);
     try {
       await onApproveLoan(approvingLoan.id, approvalDays, approvalNote);
       setApprovingLoan(null);
       setApprovalNote('');
     } catch (err: any) {
-      alert(`Gagal menyetujui peminjaman: ${err.message}`);
+      setModalError(err?.message || 'Gagal menyetujui peminjaman.');
     } finally {
       setIsSubmitting(false);
     }
@@ -74,24 +82,34 @@ export const AdminLoansView: React.FC<AdminLoansViewProps> = ({
 
   const handleConfirmReject = async () => {
     if (!rejectingLoan) return;
+    if (!rejectReason.trim()) {
+      setModalError('Alasan penolakan wajib diisi agar pengunjung mengetahui alasannya.');
+      return;
+    }
+    setModalError(null);
     setIsSubmitting(true);
     try {
-      await onRejectLoan(rejectingLoan.id, rejectReason);
+      await onRejectLoan(rejectingLoan.id, rejectReason.trim());
       setRejectingLoan(null);
       setRejectReason('');
     } catch (err: any) {
-      alert(`Gagal menolak peminjaman: ${err.message}`);
+      setModalError(err?.message || 'Gagal menolak peminjaman.');
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  const handleConfirmReturn = async (loanId: string) => {
-    if (!confirm('Konfirmasi bahwa buku ini telah diterima kembali dalam kondisi baik?')) return;
+  const handleConfirmReturn = async () => {
+    if (!returningLoan) return;
+    setModalError(null);
+    setIsSubmitting(true);
     try {
-      await onReturnLoan(loanId);
+      await onReturnLoan(returningLoan.id);
+      setReturningLoan(null);
     } catch (err: any) {
-      alert(`Gagal mengonfirmasi pengembalian: ${err.message}`);
+      setModalError(err?.message || 'Gagal mengonfirmasi pengembalian buku.');
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -138,9 +156,10 @@ export const AdminLoansView: React.FC<AdminLoansViewProps> = ({
           {[
             { id: 'all', label: 'Semua' },
             { id: 'pending', label: 'Menunggu (Pending)' },
-            { id: 'approved', label: 'Disetujui' },
+            { id: 'approved', label: 'Disetujui / Aktif' },
             { id: 'returned', label: 'Dikembalikan' },
             { id: 'rejected', label: 'Ditolak' },
+            { id: 'expired', label: 'Kedaluwarsa' },
           ].map((tab) => (
             <button
               key={tab.id}
@@ -273,6 +292,7 @@ export const AdminLoansView: React.FC<AdminLoansViewProps> = ({
                           <div className="flex items-center justify-end gap-1.5">
                             <button
                               onClick={() => {
+                                setModalError(null);
                                 setApprovingLoan(loan);
                                 setApprovalDays(7);
                                 setApprovalNote('');
@@ -284,6 +304,7 @@ export const AdminLoansView: React.FC<AdminLoansViewProps> = ({
                             </button>
                             <button
                               onClick={() => {
+                                setModalError(null);
                                 setRejectingLoan(loan);
                                 setRejectReason('');
                               }}
@@ -297,7 +318,10 @@ export const AdminLoansView: React.FC<AdminLoansViewProps> = ({
 
                         {(loan.status === 'approved' || loan.status === 'borrowed') && (
                           <button
-                            onClick={() => handleConfirmReturn(loan.id)}
+                            onClick={() => {
+                              setModalError(null);
+                              setReturningLoan(loan);
+                            }}
                             className="px-3 py-1.5 rounded-lg bg-blue-900 hover:bg-blue-950 text-amber-300 font-bold text-xs flex items-center gap-1.5 ml-auto cursor-pointer"
                           >
                             <RotateCcw className="w-3 h-3" />
@@ -322,10 +346,23 @@ export const AdminLoansView: React.FC<AdminLoansViewProps> = ({
               <h3 className="font-bold text-sm text-slate-900 font-brand">
                 Setujui Peminjaman Buku
               </h3>
-              <button onClick={() => setApprovingLoan(null)} className="text-slate-400 hover:text-slate-600">
+              <button
+                onClick={() => {
+                  setModalError(null);
+                  setApprovingLoan(null);
+                }}
+                className="text-slate-400 hover:text-slate-600"
+              >
                 <X className="w-4 h-4" />
               </button>
             </div>
+
+            {modalError && (
+              <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{modalError}</span>
+              </div>
+            )}
 
             <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200 text-xs">
               <p className="font-bold text-slate-900">{approvingLoan.book?.title}</p>
@@ -396,10 +433,23 @@ export const AdminLoansView: React.FC<AdminLoansViewProps> = ({
               <h3 className="font-bold text-sm text-slate-900 font-brand">
                 Tolak Peminjaman Buku
               </h3>
-              <button onClick={() => setRejectingLoan(null)} className="text-slate-400 hover:text-slate-600">
+              <button
+                onClick={() => {
+                  setModalError(null);
+                  setRejectingLoan(null);
+                }}
+                className="text-slate-400 hover:text-slate-600"
+              >
                 <X className="w-4 h-4" />
               </button>
             </div>
+
+            {modalError && (
+              <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{modalError}</span>
+              </div>
+            )}
 
             <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200 text-xs">
               <p className="font-bold text-slate-900">{rejectingLoan.book?.title}</p>
@@ -423,7 +473,10 @@ export const AdminLoansView: React.FC<AdminLoansViewProps> = ({
             <div className="flex gap-2 justify-end pt-2">
               <button
                 type="button"
-                onClick={() => setRejectingLoan(null)}
+                onClick={() => {
+                  setModalError(null);
+                  setRejectingLoan(null);
+                }}
                 className="px-4 py-2 rounded-xl bg-slate-100 text-slate-700 font-semibold text-xs"
               >
                 Batal
@@ -435,6 +488,65 @@ export const AdminLoansView: React.FC<AdminLoansViewProps> = ({
                 className="px-5 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs shadow-md disabled:opacity-50 cursor-pointer"
               >
                 {isSubmitting ? 'Memproses...' : 'Tolak Permintaan'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Konfirmasi Pengembalian Buku */}
+      {returningLoan && (
+        <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-md bg-white rounded-3xl p-6 space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <h3 className="font-bold text-sm text-slate-900 font-brand">
+                Konfirmasi Pengembalian Buku
+              </h3>
+              <button
+                onClick={() => {
+                  setModalError(null);
+                  setReturningLoan(null);
+                }}
+                className="text-slate-400 hover:text-slate-600"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {modalError && (
+              <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{modalError}</span>
+              </div>
+            )}
+
+            <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200 text-xs">
+              <p className="font-bold text-slate-900">{returningLoan.book?.title || 'Koleksi Buku'}</p>
+              <p className="text-slate-500">Peminjam: {returningLoan.profile?.full_name || 'Pengunjung'}</p>
+            </div>
+
+            <p className="text-xs text-slate-600 leading-relaxed">
+              Pastikan buku telah diterima kembali dalam kondisi baik sebelum menyelesaikan transaksi peminjaman ini.
+            </p>
+
+            <div className="flex gap-2 justify-end pt-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setModalError(null);
+                  setReturningLoan(null);
+                }}
+                className="px-4 py-2 rounded-xl bg-slate-100 text-slate-700 font-semibold text-xs"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                disabled={isSubmitting}
+                onClick={handleConfirmReturn}
+                className="px-5 py-2 rounded-xl bg-blue-900 hover:bg-blue-950 text-amber-300 font-bold text-xs shadow-md disabled:opacity-50 cursor-pointer"
+              >
+                {isSubmitting ? 'Memproses...' : 'Ya, Konfirmasi Kembali'}
               </button>
             </div>
           </div>

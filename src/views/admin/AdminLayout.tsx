@@ -125,7 +125,9 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
             </div>
             <div className="min-w-0 flex-1">
               <p className="text-xs font-bold text-white truncate">{user?.fullName || 'Admin'}</p>
-              <p className="text-[10px] text-amber-400 font-medium truncate">Super Admin</p>
+              <p className="text-[10px] text-amber-400 font-medium truncate">
+                {user?.role === 'super_admin' || user?.is_super_admin ? 'Super Admin' : 'Administrator'}
+              </p>
             </div>
           </div>
 
@@ -188,7 +190,29 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
             );
           })}
 
-          <div className="pt-3 border-t border-slate-800">
+          <div className="pt-3 border-t border-slate-800 space-y-2">
+            <button
+              onClick={() => {
+                setMobileSidebarOpen(false);
+                onOpenAddBookModal();
+              }}
+              className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl bg-amber-500/15 text-amber-300 border border-amber-400/30 text-xs font-semibold"
+            >
+              <Plus className="w-3.5 h-3.5 text-amber-400" />
+              <span>Tambah Buku Baru</span>
+            </button>
+            {onPreviewVisitorCatalog && (
+              <button
+                onClick={() => {
+                  setMobileSidebarOpen(false);
+                  onPreviewVisitorCatalog();
+                }}
+                className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl bg-slate-900 text-slate-200 border border-slate-700 text-xs font-semibold"
+              >
+                <Compass className="w-3.5 h-3.5 text-amber-400" />
+                <span>Lihat Tampilan Pengunjung</span>
+              </button>
+            )}
             <button
               onClick={() => logout()}
               className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl bg-rose-950/40 text-rose-300 border border-rose-800/60 text-xs font-semibold"

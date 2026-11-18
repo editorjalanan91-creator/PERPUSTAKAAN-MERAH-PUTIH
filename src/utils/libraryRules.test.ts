@@ -6,6 +6,18 @@ import {
   filterAndSortBooks,
   aggregateMonthlyReport,
   formatDateIndo,
+  BOOK_RETURN_NOTIFICATIONS,
+  resolveBookReturnNotification,
+  formatLoanStatusIndo,
+  getLocalYearMonth,
+  getAvailableReportMonths,
+  recalculateBookStockOnEdit,
+  validateBookFormInput,
+  validateCoverFile,
+  validateBookDocumentFile,
+  evaluateLoanReturnEligibility,
+  computeBookStockAfterReturn,
+  formatBookReturnErrorMessage,
 } from './libraryRules';
 import { Book, Loan } from '../types';
 
@@ -200,3 +212,221 @@ test('formatDateIndo - formats date to Indonesian readable string', () => {
   const str = formatDateIndo('2026-11-09');
   assert.ok(str.includes('November') && str.includes('2026'));
 });
+
+test('resolveBookReturnNotification - returns success when transaction status is returned and safe Indonesian message when unconfirmed', () => {
+  const successNotice = resolveBookReturnNotification('returned');
+  assert.equal(successNotice.type, 'success');
+  assert.equal(successNotice.title, 'Buku Berhasil Dikembalikan');
+  assert.equal(successNotice.message, BOOK_RETURN_NOTIFICATIONS.SUCCESS.message);
+
+  for (const status of ['approved', 'borrowed', 'pending', null, undefined]) {
+    const failNotice = resolveBookReturnNotification(status);
+    assert.equal(failNotice.type, 'error');
+    assert.equal(failNotice.title, 'Pengembalian Buku Belum Dapat Dikonfirmasi');
+    assert.equal(
+      failNotice.message,
+      'Permintaan pengembalian buku belum dapat dikonfirmasi oleh sistem. Silakan periksa status peminjaman Anda atau hubungi administrator perpustakaan apabila kendala masih terjadi.'
+    );
+    assert.equal(failNotice.message.includes('Cannot coerce'), false);
+    assert.equal(failNotice.message.includes('PGRST'), false);
+  }
+});
+
+test('recalculateBookStockOnEdit - preserves borrowed copies invariant and rejects invalid reductions', () => {
+  // Total 5, available 3 -> 2 borrowed. Raising total to 8 -> available 6
+  const raised = recalculateBookStockOnEdit(5, 3, 8);
+  assert.equal(raised.valid, true);
+  if (raised.valid) {
+    assert.equal(raised.totalCopies, 8);
+    assert.equal(raised.availableCopies, 6);
+    assert.equal(raised.borrowedCount, 2);
+  }
+
+  // Reducing total from 5 to 4 when 2 are borrowed -> available 2
+  const reduced = recalculateBookStockOnEdit(5, 3, 4);
+  assert.equal(reduced.valid, true);
+  if (reduced.valid) {
+    assert.equal(reduced.availableCopies, 2);
+  }
+
+  // Reject reducing total below active borrowed count (1 < 2)
+  const invalid = recalculateBookStockOnEdit(5, 3, 1);
+  assert.equal(invalid.valid, false);
+});
+
+test('validateBookFormInput, validateCoverFile, and validateBookDocumentFile enforce strict book and PDF rules', () => {
+  assert.equal(
+    validateBookFormInput({
+      title: 'Bumi Manusia',
+      author: 'Pramoedya Ananta Toer',
+      category_id: 'cat-1',
+      publication_year: 2020,
+      isbn: '978-979-97312-3-4',
+      total_copies: 3,
+      currentYear: 2026,
+    }).valid,
+    true
+  );
+
+  assert.equal(
+    validateBookFormInput({
+      title: 'A',
+      author: 'Author',
+      category_id: 'cat-1',
+      publication_year: 2020,
+      total_copies: 1,
+    }).valid,
+    false
+  );
+
+  assert.equal(
+    validateBookFormInput({
+      title: 'Judul Valid',
+      author: 'Penulis Valid',
+      category_id: '',
+      publication_year: 2020,
+      total_copies: 1,
+    }).valid,
+    false
+  );
+
+  assert.equal(
+    validateCoverFile({ name: 'sampul.jpg', size: 1024 * 500, type: 'image/jpeg' }).valid,
+    true
+  );
+  assert.equal(
+    validateCoverFile({ name: 'script.exe', size: 1024, type: 'application/octet-stream' }).valid,
+    false
+  );
+
+  const validPdf = validateBookDocumentFile({
+    name: 'modul.pdf',
+    size: 1024 * 1024,
+    type: 'application/pdf',
+  });
+  assert.equal(validPdf.valid, true);
+  assert.equal(validPdf.fileType, 'pdf');
+
+  assert.equal(
+    validateBookDocumentFile({
+      name: 'dokumen.docx',
+      size: 1024,
+      type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    }).valid,
+    false
+  );
+  assert.equal(
+    validateBookDocumentFile({ name: 'kosong.pdf', size: 0, type: 'application/pdf' }).valid,
+    false
+  );
+  assert.equal(
+    validateBookDocumentFile({
+      name: 'terlalu-besar.pdf',
+      size: 60 * 1024 * 1024,
+      type: 'application/pdf',
+    }).valid,
+    false
+  );
+});
+
+test('getLocalYearMonth, getAvailableReportMonths, and formatLoanStatusIndo work accurately without UTC shift', () => {
+  const localNov = new Date(2026, 10, 1, 0, 15, 0); // 1 Nov 2026 00:15 local time
+  assert.equal(getLocalYearMonth(localNov), '2026-11');
+
+  const months = getAvailableReportMonths(
+    [{ requested_at: '2025-02-10T10:00:00Z' }],
+    localNov
+  );
+  assert.equal(months[0].value, '2026-11');
+  assert.ok(months.some((m) => m.value === '2025-02'));
+  assert.equal(formatLoanStatusIndo('approved'), 'Disetujui / Aktif');
+  assert.equal(formatLoanStatusIndo('returned'), 'Sudah Dikembalikan');
+});
+
+test('evaluateLoanReturnEligibility allows approved/borrowed, marks returned as already_returned, and rejects non-active statuses', () => {
+  assert.deepEqual(evaluateLoanReturnEligibility('approved'), { eligible: true });
+  assert.deepEqual(evaluateLoanReturnEligibility('borrowed'), { eligible: true });
+
+  const alreadyReturned = evaluateLoanReturnEligibility('returned');
+  assert.equal(alreadyReturned.eligible, false);
+  if (!alreadyReturned.eligible) {
+    assert.equal(alreadyReturned.reason, 'already_returned');
+  }
+
+  for (const status of ['pending', 'rejected', 'expired', 'unknown_status', null] as const) {
+    const res = evaluateLoanReturnEligibility(status);
+    assert.equal(res.eligible, false);
+    if (!res.eligible) {
+      assert.equal(res.reason, 'invalid_status');
+      assert.ok(res.message.length > 10);
+    }
+  }
+});
+
+test('computeBookStockAfterReturn increments stock exactly once and prevents double-increment when a DB trigger is active', () => {
+  // Tanpa trigger database: before=2, after=2, total=5 => aplikasi naikkan tepat +1 ke 3
+  const appIncrement = computeBookStockAfterReturn({
+    beforeAvailable: 2,
+    afterAvailable: 2,
+    totalCopies: 5,
+  });
+  assert.equal(appIncrement.targetAvailable, 3);
+  assert.equal(appIncrement.needsUpdate, true);
+  assert.equal(appIncrement.incrementedBy, 'application');
+
+  // Dengan trigger database: before=2, after=3, total=5 => tidak update lagi (hindari stok jadi 4)
+  const triggerIncrement = computeBookStockAfterReturn({
+    beforeAvailable: 2,
+    afterAvailable: 3,
+    totalCopies: 5,
+  });
+  assert.equal(triggerIncrement.targetAvailable, 3);
+  assert.equal(triggerIncrement.needsUpdate, false);
+  assert.equal(triggerIncrement.incrementedBy, 'trigger');
+
+  // Tidak pernah melebihi total_copies
+  const capped = computeBookStockAfterReturn({
+    beforeAvailable: 5,
+    afterAvailable: 5,
+    totalCopies: 5,
+  });
+  assert.equal(capped.targetAvailable, 5);
+  assert.equal(capped.needsUpdate, false);
+  assert.equal(capped.incrementedBy, 'capped_at_total');
+
+  // Trigger melebihi total_copies => clamp turun ke total_copies
+  const clampedTrigger = computeBookStockAfterReturn({
+    beforeAvailable: 4,
+    afterAvailable: 6,
+    totalCopies: 5,
+  });
+  assert.equal(clampedTrigger.targetAvailable, 5);
+  assert.equal(clampedTrigger.needsUpdate, true);
+  assert.equal(clampedTrigger.incrementedBy, 'trigger');
+});
+
+test('formatBookReturnErrorMessage hides PostgREST PGRST116 / RLS technical errors behind clear Indonesian copy', () => {
+  assert.equal(
+    formatBookReturnErrorMessage({
+      code: 'PGRST116',
+      message: 'Cannot coerce the result to a single JSON object',
+    }),
+    BOOK_RETURN_NOTIFICATIONS.UNCONFIRMED.message
+  );
+
+  assert.equal(
+    formatBookReturnErrorMessage({
+      message: 'JSON object requested, multiple (or no) rows returned (0 rows)',
+    }),
+    BOOK_RETURN_NOTIFICATIONS.UNCONFIRMED.message
+  );
+
+  assert.match(
+    formatBookReturnErrorMessage({
+      code: '42501',
+      message: 'new row violates row-level security policy for table "loans"',
+    }),
+    /izin akses/i
+  );
+});
+

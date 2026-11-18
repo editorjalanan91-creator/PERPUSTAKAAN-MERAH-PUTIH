@@ -1,6 +1,11 @@
 import React, { useState, useMemo } from 'react';
 import { Loan } from '../../types';
-import { formatDateIndo, aggregateMonthlyReport } from '../../utils/libraryRules';
+import {
+  formatDateIndo,
+  aggregateMonthlyReport,
+  getLocalYearMonth,
+  getAvailableReportMonths,
+} from '../../utils/libraryRules';
 import { getBookCoverUrl } from '../../services/supabaseClient';
 import {
   FileText,
@@ -19,25 +24,13 @@ interface AdminReportsViewProps {
 }
 
 export const AdminReportsView: React.FC<AdminReportsViewProps> = ({ loans }) => {
-  const currentMonthYear = new Date().toISOString().slice(0, 7);
+  const currentMonthYear = getLocalYearMonth();
   const [selectedPeriod, setSelectedPeriod] = useState<string>(currentMonthYear);
 
-  // Month options: current and past 6 months
+  // Daftar bulan lokal + seluruh bulan historis dari data transaksi loans
   const monthOptions = useMemo(() => {
-    const list = [];
-    const date = new Date();
-    const monthsIndo = [
-      'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni',
-      'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'
-    ];
-    for (let i = 0; i < 7; i++) {
-      const d = new Date(date.getFullYear(), date.getMonth() - i, 1);
-      const val = d.toISOString().slice(0, 7);
-      const label = `${monthsIndo[d.getMonth()]} ${d.getFullYear()}`;
-      list.push({ value: val, label });
-    }
-    return list;
-  }, []);
+    return getAvailableReportMonths(loans);
+  }, [loans]);
 
   const report = useMemo(() => {
     const base = aggregateMonthlyReport(loans, selectedPeriod);

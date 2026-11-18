@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { BookOpen, User, Lock, Mail, UserPlus, LogIn, Eye, EyeOff, MailCheck, ArrowLeft } from 'lucide-react';
+import { BookOpen, User, Lock, Mail, UserPlus, LogIn, Eye, EyeOff, MailCheck, ArrowLeft, RefreshCw } from 'lucide-react';
 
 interface AuthViewProps {
   initialMode?: 'login' | 'register';
@@ -11,7 +11,13 @@ export const AuthView: React.FC<AuthViewProps> = ({
   initialMode = 'login',
   onOpenForgotPassword,
 }) => {
-  const { login, register } = useAuth();
+  const {
+    login,
+    register,
+    supabaseConnectionError,
+    isCheckingConnection,
+    recheckSupabaseConnection,
+  } = useAuth();
   const [mode, setMode] = useState<'login' | 'register'>(initialMode);
 
   // Login form state
@@ -31,6 +37,20 @@ export const AuthView: React.FC<AuthViewProps> = ({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [verificationNoticeEmail, setVerificationNoticeEmail] = useState<string | null>(null);
+
+  // Hapus otomatis pesan error koneksi lama jika pemeriksaan koneksi live dari browser sudah berhasil
+  useEffect(() => {
+    if (supabaseConnectionError === null && errorMessage) {
+      const lower = errorMessage.toLowerCase();
+      if (
+        lower.includes('failed to fetch') ||
+        lower.includes('gagal terhubung ke server supabase') ||
+        lower.includes('konfigurasi vite_supabase_')
+      ) {
+        setErrorMessage(null);
+      }
+    }
+  }, [supabaseConnectionError, errorMessage]);
 
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -184,10 +204,36 @@ export const AuthView: React.FC<AuthViewProps> = ({
 
               <div className="p-6 sm:p-8">
                 {/* Error Notification Banner */}
-                {errorMessage && (
+                {(errorMessage || supabaseConnectionError) && (
                   <div className="mb-6 p-4 rounded-xl bg-rose-950/70 border border-rose-800/80 text-rose-200 text-sm flex items-start gap-3">
                     <span className="shrink-0 mt-0.5 font-bold">⚠️</span>
-                    <div className="flex-1">{errorMessage}</div>
+                    <div className="flex-1 space-y-2.5">
+                      <div>{errorMessage || supabaseConnectionError}</div>
+                      {(supabaseConnectionError ||
+                        (errorMessage &&
+                          errorMessage.toLowerCase().includes('failed to fetch'))) && (
+                        <button
+                          type="button"
+                          disabled={isCheckingConnection}
+                          onClick={async () => {
+                            const ok = await recheckSupabaseConnection();
+                            if (ok) {
+                              setErrorMessage(null);
+                            }
+                          }}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-rose-900/70 hover:bg-rose-800/80 border border-rose-700/70 text-xs font-semibold text-rose-100 transition-colors cursor-pointer disabled:opacity-50"
+                        >
+                          <RefreshCw
+                            className={`w-3.5 h-3.5 ${isCheckingConnection ? 'animate-spin' : ''}`}
+                          />
+                          <span>
+                            {isCheckingConnection
+                              ? 'Memeriksa Koneksi Supabase...'
+                              : 'Uji Ulang Koneksi Supabase'}
+                          </span>
+                        </button>
+                      )}
+                    </div>
                   </div>
                 )}
 

@@ -222,3 +222,382 @@ export function formatDateIndo(dateStr?: string | null): string {
     return dateStr;
   }
 }
+
+export const BOOK_RETURN_NOTIFICATIONS = {
+  SUCCESS: {
+    type: 'success' as const,
+    title: 'Buku Berhasil Dikembalikan',
+    message: 'Buku berhasil dikembalikan. Terima kasih!',
+  },
+  UNCONFIRMED: {
+    type: 'error' as const,
+    title: 'Pengembalian Buku Belum Dapat Dikonfirmasi',
+    message:
+      'Permintaan pengembalian buku belum dapat dikonfirmasi oleh sistem. Silakan periksa status peminjaman Anda atau hubungi administrator perpustakaan apabila kendala masih terjadi.',
+  },
+};
+
+export function resolveBookReturnNotification(loanStatus?: LoanStatus | string | null) {
+  if (loanStatus === 'returned') {
+    return BOOK_RETURN_NOTIFICATIONS.SUCCESS;
+  }
+  return BOOK_RETURN_NOTIFICATIONS.UNCONFIRMED;
+}
+
+export function formatLoanStatusIndo(status?: LoanStatus | string | null): string {
+  switch (status) {
+    case 'pending':
+      return 'Menunggu Persetujuan';
+    case 'approved':
+    case 'borrowed':
+      return 'Disetujui / Aktif';
+    case 'returned':
+      return 'Sudah Dikembalikan';
+    case 'rejected':
+      return 'Ditolak';
+    case 'expired':
+      return 'Kedaluwarsa';
+    default:
+      return String(status || '-');
+  }
+}
+
+export function getLocalYearMonth(date: Date = new Date()): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  return `${year}-${month}`;
+}
+
+export function getAvailableReportMonths(
+  loans: Pick<Loan, 'requested_at' | 'created_at'>[],
+  referenceDate: Date = new Date()
+): Array<{ value: string; label: string }> {
+  const monthsIndo = [
+    'Januari',
+    'Februari',
+    'Maret',
+    'April',
+    'Mei',
+    'Juni',
+    'Juli',
+    'Agustus',
+    'September',
+    'Oktober',
+    'November',
+    'Desember',
+  ];
+
+  const periodSet = new Set<string>();
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(referenceDate.getFullYear(), referenceDate.getMonth() - i, 1);
+    periodSet.add(getLocalYearMonth(d));
+  }
+
+  for (const loan of loans) {
+    const raw = (loan.requested_at || loan.created_at || '').trim();
+    if (/^\d{4}-\d{2}/.test(raw)) {
+      periodSet.add(raw.slice(0, 7));
+    }
+  }
+
+  return Array.from(periodSet)
+    .sort((a, b) => b.localeCompare(a))
+    .map((val) => {
+      const [yearStr, monthStr] = val.split('-');
+      const monthIdx = parseInt(monthStr, 10) - 1;
+      const monthLabel = monthsIndo[monthIdx] || 'Bulan';
+      return {
+        value: val,
+        label: `${monthLabel} ${yearStr}`,
+      };
+    });
+}
+
+export function recalculateBookStockOnEdit(
+  oldTotalCopies: number,
+  oldAvailableCopies: number,
+  newTotalCopies: number
+):
+  | { valid: true; totalCopies: number; availableCopies: number; borrowedCount: number }
+  | { valid: false; error: string } {
+  if (!Number.isInteger(newTotalCopies) || newTotalCopies < 1) {
+    return {
+      valid: false,
+      error: 'Total eksemplar buku minimal harus 1 dan berupa bilangan bulat.',
+    };
+  }
+
+  const safeOldTotal = Math.max(0, Math.floor(Number(oldTotalCopies) || 0));
+  const safeOldAvailable = Math.max(0, Math.min(safeOldTotal, Math.floor(Number(oldAvailableCopies) || 0)));
+  const borrowedCount = Math.max(0, safeOldTotal - safeOldAvailable);
+
+  if (newTotalCopies < borrowedCount) {
+    return {
+      valid: false,
+      error: `Total eksemplar (${newTotalCopies}) tidak boleh lebih kecil dari jumlah buku yang sedang dipinjam (${borrowedCount} eksemplar).`,
+    };
+  }
+
+  const availableCopies = Math.max(0, Math.min(newTotalCopies, newTotalCopies - borrowedCount));
+  return {
+    valid: true,
+    totalCopies: newTotalCopies,
+    availableCopies,
+    borrowedCount,
+  };
+}
+
+export function validateBookFormInput(data: {
+  title?: string;
+  author?: string;
+  category_id?: string;
+  publication_year?: number | string;
+  isbn?: string;
+  total_copies?: number | string;
+  currentYear?: number;
+}): { valid: boolean; error?: string } {
+  const title = (data.title || '').trim();
+  if (title.length < 2) {
+    return { valid: false, error: 'Judul buku wajib diisi minimal 2 karakter.' };
+  }
+
+  const author = (data.author || '').trim();
+  if (author.length < 2) {
+    return { valid: false, error: 'Nama penulis wajib diisi minimal 2 karakter.' };
+  }
+
+  if (!data.category_id || !data.category_id.trim()) {
+    return {
+      valid: false,
+      error: 'Kategori buku wajib dipilih. Tambahkan kategori terlebih dahulu apabila daftar masih kosong.',
+    };
+  }
+
+  const maxYear = (data.currentYear ?? new Date().getFullYear()) + 1;
+  const pubYear = Number(data.publication_year);
+  if (!Number.isInteger(pubYear) || pubYear < 1800 || pubYear > maxYear) {
+    return {
+      valid: false,
+      error: `Tahun terbit harus berupa angka antara 1800 hingga ${maxYear}.`,
+    };
+  }
+
+  const totalCopies = Number(data.total_copies);
+  if (!Number.isInteger(totalCopies) || totalCopies < 1) {
+    return {
+      valid: false,
+      error: 'Total eksemplar / stok buku minimal harus 1.',
+    };
+  }
+
+  const isbn = (data.isbn || '').trim();
+  if (isbn.length > 0 && !/^[0-9Xx\-\s]{4,32}$/.test(isbn)) {
+    return {
+      valid: false,
+      error: 'Format nomor ISBN tidak valid (gunakan 4–32 karakter angka, tanda hubung "-", atau huruf X).',
+    };
+  }
+
+  return { valid: true };
+}
+
+export const MAX_COVER_SIZE_BYTES = 5 * 1024 * 1024; // 5 MB
+export const MAX_BOOK_DOC_SIZE_BYTES = 50 * 1024 * 1024; // 50 MB
+
+export function validateCoverFile(file: {
+  name: string;
+  size: number;
+  type?: string;
+}): { valid: boolean; error?: string } {
+  const ext = (file.name.split('.').pop() || '').toLowerCase();
+  const allowedExts = ['jpg', 'jpeg', 'png', 'webp'];
+  if (!allowedExts.includes(ext)) {
+    return {
+      valid: false,
+      error: 'Format sampul harus berupa gambar JPG, JPEG, PNG, atau WEBP.',
+    };
+  }
+
+  if (file.type && !file.type.toLowerCase().startsWith('image/')) {
+    return {
+      valid: false,
+      error: 'Tipe berkas sampul tidak valid. Pilih berkas gambar yang sah.',
+    };
+  }
+
+  if (!Number.isFinite(file.size) || file.size <= 0) {
+    return {
+      valid: false,
+      error: 'Berkas gambar sampul kosong atau rusak.',
+    };
+  }
+
+  if (file.size > MAX_COVER_SIZE_BYTES) {
+    return {
+      valid: false,
+      error: 'Ukuran foto sampul maksimal 5 MB.',
+    };
+  }
+
+  return { valid: true };
+}
+
+export function validateBookDocumentFile(file: {
+  name: string;
+  size: number;
+  type?: string;
+}): { valid: boolean; fileType?: 'pdf' | 'epub'; error?: string } {
+  const ext = (file.name.split('.').pop() || '').toLowerCase();
+  if (ext !== 'pdf' && ext !== 'epub') {
+    return {
+      valid: false,
+      error: 'Format dokumen buku hanya mendukung berkas PDF (.pdf) atau EPUB (.epub).',
+    };
+  }
+
+  const mime = (file.type || '').toLowerCase();
+  if (mime) {
+    const validPdfMime = ext === 'pdf' && (mime === 'application/pdf' || mime === 'application/x-pdf');
+    const validEpubMime =
+      ext === 'epub' && (mime === 'application/epub+zip' || mime === 'application/octet-stream');
+    if (!validPdfMime && !validEpubMime) {
+      return {
+        valid: false,
+        error: `Tipe MIME berkas (${mime}) tidak sesuai dengan ekstensi .${ext}.`,
+      };
+    }
+  }
+
+  if (!Number.isFinite(file.size) || file.size <= 0) {
+    return {
+      valid: false,
+      error: 'Berkas dokumen buku kosong atau rusak.',
+    };
+  }
+
+  if (file.size > MAX_BOOK_DOC_SIZE_BYTES) {
+    return {
+      valid: false,
+      error: 'Ukuran dokumen PDF/EPUB maksimal 50 MB.',
+    };
+  }
+
+  return { valid: true, fileType: ext };
+}
+
+export function evaluateLoanReturnEligibility(
+  status?: LoanStatus | string | null
+):
+  | { eligible: true }
+  | { eligible: false; reason: 'already_returned' | 'invalid_status'; message: string } {
+  if (status === 'approved' || status === 'borrowed') {
+    return { eligible: true };
+  }
+
+  if (status === 'returned') {
+    return {
+      eligible: false,
+      reason: 'already_returned',
+      message: 'Buku untuk transaksi peminjaman ini sudah dikembalikan sebelumnya.',
+    };
+  }
+
+  if (status === 'pending') {
+    return {
+      eligible: false,
+      reason: 'invalid_status',
+      message: 'Pengajuan peminjaman yang masih menunggu persetujuan admin belum dapat dikembalikan.',
+    };
+  }
+
+  if (status === 'rejected') {
+    return {
+      eligible: false,
+      reason: 'invalid_status',
+      message: 'Transaksi peminjaman yang telah ditolak tidak dapat dikembalikan.',
+    };
+  }
+
+  if (status === 'expired') {
+    return {
+      eligible: false,
+      reason: 'invalid_status',
+      message: 'Transaksi peminjaman ini berstatus kedaluwarsa. Hubungi administrator perpustakaan untuk penyesuaian.',
+    };
+  }
+
+  return {
+    eligible: false,
+    reason: 'invalid_status',
+    message: 'Status transaksi peminjaman tidak memenuhi syarat untuk proses pengembalian.',
+  };
+}
+
+export function computeBookStockAfterReturn(input: {
+  beforeAvailable: number;
+  afterAvailable: number;
+  totalCopies: number;
+}): {
+  targetAvailable: number;
+  safeBefore: number;
+  safeAfter: number;
+  safeTotal: number;
+  needsUpdate: boolean;
+  incrementedBy: 'trigger' | 'application' | 'capped_at_total';
+} {
+  const safeTotal = Math.max(0, Math.floor(Number(input.totalCopies) || 0));
+  const safeBefore = Math.max(0, Math.floor(Number(input.beforeAvailable) || 0));
+  const safeAfter = Math.max(0, Math.floor(Number(input.afterAvailable) || 0));
+
+  // Jika trigger database sudah menaikkan available_copies secara otomatis saat status menjadi 'returned',
+  // jangan tambahkan stok lagi dari aplikasi agar tidak terjadi penggandaan stok.
+  if (safeAfter > safeBefore) {
+    const clampedTarget = safeTotal > 0 ? Math.min(safeTotal, safeAfter) : safeAfter;
+    return {
+      targetAvailable: clampedTarget,
+      safeBefore,
+      safeAfter,
+      safeTotal,
+      needsUpdate: clampedTarget !== safeAfter,
+      incrementedBy: 'trigger',
+    };
+  }
+
+  // Jika trigger database tidak mengubah stok, naikkan tepat +1 (maksimal sebesar total_copies).
+  const incremented = safeBefore + 1;
+  const targetAvailable = safeTotal > 0 ? Math.min(safeTotal, incremented) : incremented;
+  const needsUpdate = targetAvailable !== safeAfter;
+
+  return {
+    targetAvailable,
+    safeBefore,
+    safeAfter,
+    safeTotal,
+    needsUpdate,
+    incrementedBy: needsUpdate ? 'application' : 'capped_at_total',
+  };
+}
+
+export function formatBookReturnErrorMessage(err: any): string {
+  const code = String(err?.code || '').trim();
+  const rawMessage = String(err?.message || '').trim();
+  const lower = rawMessage.toLowerCase();
+
+  if (
+    code === 'PGRST116' ||
+    lower.includes('cannot coerce the result to a single json object') ||
+    lower.includes('0 rows')
+  ) {
+    return BOOK_RETURN_NOTIFICATIONS.UNCONFIRMED.message;
+  }
+
+  if (
+    code === '42501' ||
+    lower.includes('permission denied') ||
+    lower.includes('row-level security')
+  ) {
+    return 'Anda tidak memiliki izin akses untuk memperbarui pengembalian buku ini. Silakan hubungi administrator perpustakaan.';
+  }
+
+  return rawMessage || BOOK_RETURN_NOTIFICATIONS.UNCONFIRMED.message;
+}

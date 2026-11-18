@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Loan } from '../types';
-import { formatDateIndo } from '../utils/libraryRules';
+import { formatDateIndo, formatLoanStatusIndo } from '../utils/libraryRules';
 import { getBookCoverUrl, getBookFileSignedUrl } from '../services/supabaseClient';
 import {
   BookMarked,
@@ -35,6 +35,19 @@ export const UserLoansView: React.FC<UserLoansViewProps> = ({
   const [filterStatus, setFilterStatus] = useState<'all' | 'pending' | 'approved' | 'returned'>('all');
   const [selectedReceiptLoan, setSelectedReceiptLoan] = useState<Loan | null>(null);
   const [readingLoanId, setReadingLoanId] = useState<string | null>(null);
+  const [returningLoanId, setReturningLoanId] = useState<string | null>(null);
+  const [readyReaderLink, setReadyReaderLink] = useState<{ loanId: string; url: string } | null>(null);
+  const [readerError, setReaderError] = useState<string | null>(null);
+
+  const handleReturnClick = async (loanId: string) => {
+    if (isReturning || returningLoanId) return;
+    setReturningLoanId(loanId);
+    try {
+      await onReturnBook(loanId);
+    } finally {
+      setReturningLoanId(null);
+    }
+  };
 
   const filteredLoans = loans.filter((l) => {
     if (filterStatus === 'all') return true;
@@ -46,22 +59,24 @@ export const UserLoansView: React.FC<UserLoansViewProps> = ({
 
   const pendingCount = loans.filter((l) => l.status === 'pending').length;
   const approvedCount = loans.filter((l) => l.status === 'approved' || l.status === 'borrowed').length;
+  const returnedCount = loans.filter((l) => l.status === 'returned').length;
 
   const handleOpenDigitalReader = async (loan: Loan) => {
+    setReaderError(null);
     if (!loan.book?.file_path) {
-      alert('Buku ini tidak memiliki lampiran berkas digital (merupakan buku fisik).');
+      setReaderError('Buku ini tidak memiliki lampiran berkas digital (koleksi fisik).');
       return;
     }
     setReadingLoanId(loan.id);
     try {
       const signedUrl = await getBookFileSignedUrl(loan.book.file_path, 7200);
       if (signedUrl) {
-        window.open(signedUrl, '_blank', 'noopener,noreferrer');
+        setReadyReaderLink({ loanId: loan.id, url: signedUrl });
       } else {
-        alert('Gagal mendapatkan tautan akses file digital. Silakan hubungi admin perpustakaan.');
+        setReaderError('Gagal mendapatkan tautan akses berkas digital. Silakan hubungi admin perpustakaan.');
       }
     } catch (err: any) {
-      alert(`Terjadi kesalahan saat memuat berkas: ${err?.message || 'Akses ditolak'}`);
+      setReaderError(err?.message || 'Terjadi kesalahan saat memuat berkas digital.');
     } finally {
       setReadingLoanId(null);
     }
@@ -112,10 +127,26 @@ export const UserLoansView: React.FC<UserLoansViewProps> = ({
               filterStatus === 'returned' ? 'bg-emerald-700 text-white shadow-sm' : 'text-slate-500 hover:text-slate-900'
             }`}
           >
-            Selesai
+            Selesai ({returnedCount})
           </button>
         </div>
       </div>
+
+      {readerError && (
+        <div className="p-3.5 rounded-2xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            <span>{readerError}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setReaderError(null)}
+            className="text-rose-700 hover:text-rose-900 font-bold"
+          >
+            Tutup
+          </button>
+        </div>
+      )}
 
       {/* Loans List */}
       {filteredLoans.length > 0 ? (
@@ -248,15 +279,28 @@ export const UserLoansView: React.FC<UserLoansViewProps> = ({
                   <div className="flex items-center gap-2 flex-wrap justify-end">
                     {/* Read Digital Book Button if approved */}
                     {isApproved && loan.book?.file_path && (
-                      <button
-                        type="button"
-                        disabled={readingLoanId === loan.id}
-                        onClick={() => handleOpenDigitalReader(loan)}
-                        className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-blue-900 hover:bg-blue-950 text-white shadow-sm transition-all cursor-pointer"
-                      >
-                        <BookOpen className="w-3.5 h-3.5 text-amber-400" />
-                        <span>{readingLoanId === loan.id ? 'Membuka...' : 'Baca Digital'}</span>
-                      </button>
+                      readyReaderLink?.loanId === loan.id ? (
+                        <a
+                          href={readyReaderLink.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-blue-900 hover:bg-blue-950 text-white shadow-sm transition-all"
+                        >
+                          <BookOpen className="w-3.5 h-3.5 text-amber-400" />
+                          <span>Buka Dokumen</span>
+                          <ExternalLink className="w-3 h-3" />
+                        </a>
+                      ) : (
+                        <button
+                          type="button"
+                          disabled={readingLoanId === loan.id}
+                          onClick={() => handleOpenDigitalReader(loan)}
+                          className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-blue-900 hover:bg-blue-950 text-white shadow-sm transition-all cursor-pointer disabled:opacity-50"
+                        >
+                          <BookOpen className="w-3.5 h-3.5 text-amber-400" />
+                          <span>{readingLoanId === loan.id ? 'Menyiapkan...' : 'Baca Digital'}</span>
+                        </button>
+                      )
                     )}
 
                     <button
@@ -271,12 +315,12 @@ export const UserLoansView: React.FC<UserLoansViewProps> = ({
                     {isApproved && (
                       <button
                         type="button"
-                        disabled={isReturning}
-                        onClick={() => onReturnBook(loan.id)}
+                        disabled={isReturning || returningLoanId !== null}
+                        onClick={() => handleReturnClick(loan.id)}
                         className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm transition-all cursor-pointer disabled:opacity-50"
                       >
-                        <RotateCcw className="w-3.5 h-3.5" />
-                        <span>Kembalikan</span>
+                        <RotateCcw className={`w-3.5 h-3.5 ${returningLoanId === loan.id ? 'animate-spin' : ''}`} />
+                        <span>{returningLoanId === loan.id ? 'Memproses...' : 'Kembalikan'}</span>
                       </button>
                     )}
                   </div>
@@ -368,8 +412,8 @@ export const UserLoansView: React.FC<UserLoansViewProps> = ({
                 )}
                 <div className="flex justify-between">
                   <span className="text-slate-500">Status Transaksi:</span>
-                  <span className="font-bold text-slate-900 uppercase">
-                    {selectedReceiptLoan.status}
+                  <span className="font-bold text-slate-900">
+                    {formatLoanStatusIndo(selectedReceiptLoan.status)}
                   </span>
                 </div>
                 {selectedReceiptLoan.admin_note && (

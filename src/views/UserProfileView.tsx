@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { supabase } from '../services/supabaseClient';
 import { formatDateIndo } from '../utils/libraryRules';
@@ -23,6 +23,13 @@ export const UserProfileView: React.FC = () => {
   const [confirmPassword, setConfirmPassword] = useState('');
   const [isChangingPassword, setIsChangingPassword] = useState(false);
 
+  useEffect(() => {
+    const latestName = profile?.full_name || user?.fullName || '';
+    if (latestName) {
+      setFullName(latestName);
+    }
+  }, [profile?.full_name, user?.fullName]);
+
   const handleUpdateProfile = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!fullName.trim()) {
@@ -33,7 +40,6 @@ export const UserProfileView: React.FC = () => {
     setIsUpdatingProfile(true);
     try {
       await updateProfile({ full_name: fullName.trim() });
-      showToast('Nama profil Anda berhasil diperbarui di database.', 'success', 'Perubahan Tersimpan');
     } catch (err: any) {
       showToast(err?.message || 'Gagal memperbarui profil.', 'error', 'Pembaruan Gagal');
     } finally {
@@ -66,7 +72,16 @@ export const UserProfileView: React.FC = () => {
       setNewPassword('');
       setConfirmPassword('');
     } catch (err: any) {
-      showToast(err?.message || 'Gagal mengubah kata sandi.', 'error', 'Perubahan Gagal');
+      const rawMsg = String(err?.message || '').toLowerCase();
+      let friendlyMsg = 'Gagal mengubah kata sandi. Silakan coba beberapa saat lagi.';
+      if (rawMsg.includes('different')) {
+        friendlyMsg = 'Kata sandi baru tidak boleh sama dengan kata sandi sebelumnya.';
+      } else if (rawMsg.includes('at least') || rawMsg.includes('weak')) {
+        friendlyMsg = 'Kata sandi baru minimal 6 karakter dan tidak terlalu lemah.';
+      } else if (rawMsg.includes('session')) {
+        friendlyMsg = 'Sesi login Anda telah berakhir. Silakan login kembali sebelum mengganti kata sandi.';
+      }
+      showToast(friendlyMsg, 'error', 'Perubahan Kata Sandi Gagal');
     } finally {
       setIsChangingPassword(false);
     }
@@ -97,7 +112,15 @@ export const UserProfileView: React.FC = () => {
         <div className="flex-1 text-center sm:text-left space-y-2">
           <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-blue-900/60 text-amber-300 border border-amber-400/30">
             <Shield className="w-3.5 h-3.5" />
-            <span>Anggota Terdaftar ({profile?.role === 'admin' ? 'Administrator' : 'Pengunjung'})</span>
+            <span>
+              Anggota Terdaftar (
+              {profile?.role === 'super_admin' || profile?.is_super_admin
+                ? 'Super Admin'
+                : profile?.role === 'admin'
+                ? 'Administrator'
+                : 'Pengunjung'}
+              )
+            </span>
           </div>
 
           <h2 className="text-2xl font-bold">{displayName}</h2>

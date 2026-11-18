@@ -32,13 +32,20 @@ export const BookDetailModal: React.FC<BookDetailModalProps> = ({
   isBorrowing = false,
   userLoan,
 }) => {
-  if (!book) return null;
-
   const [notes, setNotes] = useState<string>('');
-  const [durationDays, setDurationDays] = useState<number>(7);
   const [imageError, setImageError] = useState<boolean>(false);
   const [readingUrl, setReadingUrl] = useState<string | null>(null);
   const [isLoadingReader, setIsLoadingReader] = useState<boolean>(false);
+  const [readerError, setReaderError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setNotes('');
+    setImageError(false);
+    setReadingUrl(null);
+    setReaderError(null);
+  }, [book?.id]);
+
+  if (!book) return null;
 
   const isAvailable = (book.available_copies ?? 0) > 0;
   const coverUrl = getBookCoverUrl(book.cover_path);
@@ -53,8 +60,9 @@ export const BookDetailModal: React.FC<BookDetailModalProps> = ({
 
   // Ambil signed URL jika disetujui membaca
   const handleOpenReader = async () => {
+    setReaderError(null);
     if (!book.file_path) {
-      alert('File dokumen digital (PDF/EPUB) belum diunggah untuk buku ini.');
+      setReaderError('File dokumen digital (PDF/EPUB) belum tersedia untuk buku ini.');
       return;
     }
     setIsLoadingReader(true);
@@ -62,12 +70,11 @@ export const BookDetailModal: React.FC<BookDetailModalProps> = ({
       const signedUrl = await getBookFileSignedUrl(book.file_path, 7200); // 2 jam masa berlaku
       if (signedUrl) {
         setReadingUrl(signedUrl);
-        window.open(signedUrl, '_blank', 'noopener,noreferrer');
       } else {
-        alert('Gagal membuat tautan akses buku privat. Hubungi administrator.');
+        setReaderError('Gagal membuat tautan akses buku privat. Hubungi administrator.');
       }
     } catch (err: any) {
-      alert(`Terjadi kesalahan: ${err.message}`);
+      setReaderError(err?.message || 'Gagal membuka dokumen digital buku.');
     } finally {
       setIsLoadingReader(false);
     }
@@ -76,7 +83,7 @@ export const BookDetailModal: React.FC<BookDetailModalProps> = ({
   const handleSubmitBorrow = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!isAvailable || isBorrowing || isPending || isApprovedToRead) return;
-    await onBorrow(book.id, durationDays, notes);
+    await onBorrow(book.id, 7, notes);
   };
 
   return (
@@ -226,26 +233,44 @@ export const BookDetailModal: React.FC<BookDetailModalProps> = ({
                 {isApprovedToRead ? (
                   /* User has approved loan -> can read book */
                   <div className="space-y-3">
-                    <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-200">
-                      <p className="text-xs font-semibold text-emerald-900 mb-2">
-                        🎉 Peminjaman Anda telah disetujui oleh admin. Anda dapat membaca file buku digital ini melalui tautan privat resmi:
+                    <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-200 space-y-3">
+                      <p className="text-xs font-semibold text-emerald-900">
+                        Peminjaman Anda telah disetujui oleh admin. Anda dapat membuka berkas buku digital melalui tautan privat resmi:
                       </p>
-                      <button
-                        type="button"
-                        onClick={handleOpenReader}
-                        disabled={isLoadingReader}
-                        className="w-full py-3 px-4 rounded-xl font-bold text-sm bg-gradient-to-r from-emerald-600 to-teal-700 hover:from-emerald-500 hover:to-teal-600 text-white shadow-lg shadow-emerald-600/20 active:scale-[0.99] transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
-                      >
-                        {isLoadingReader ? (
-                          <span className="inline-block w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                        ) : (
-                          <>
-                            <BookOpen className="w-4 h-4" />
-                            <span>Buka &amp; Baca Dokumen Buku ({book.file_type?.toUpperCase() || 'PDF'})</span>
-                            <ExternalLink className="w-3.5 h-3.5 ml-1" />
-                          </>
-                        )}
-                      </button>
+                      {readerError && (
+                        <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center gap-2">
+                          <AlertCircle className="w-4 h-4 shrink-0" />
+                          <span>{readerError}</span>
+                        </div>
+                      )}
+                      {readingUrl ? (
+                        <a
+                          href={readingUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="w-full py-3 px-4 rounded-xl font-bold text-sm bg-gradient-to-r from-emerald-600 to-teal-700 hover:from-emerald-500 hover:to-teal-600 text-white shadow-lg shadow-emerald-600/20 transition-all flex items-center justify-center gap-2"
+                        >
+                          <BookOpen className="w-4 h-4" />
+                          <span>Buka Tab Dokumen ({book.file_type?.toUpperCase() || 'PDF'})</span>
+                          <ExternalLink className="w-3.5 h-3.5 ml-1" />
+                        </a>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={handleOpenReader}
+                          disabled={isLoadingReader}
+                          className="w-full py-3 px-4 rounded-xl font-bold text-sm bg-gradient-to-r from-emerald-600 to-teal-700 hover:from-emerald-500 hover:to-teal-600 text-white shadow-lg shadow-emerald-600/20 active:scale-[0.99] transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                        >
+                          {isLoadingReader ? (
+                            <span className="inline-block w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                          ) : (
+                            <>
+                              <BookOpen className="w-4 h-4" />
+                              <span>Siapkan Tautan Baca ({book.file_type?.toUpperCase() || 'PDF'})</span>
+                            </>
+                          )}
+                        </button>
+                      )}
                     </div>
                   </div>
                 ) : isPending ? (

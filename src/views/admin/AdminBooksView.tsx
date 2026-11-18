@@ -1,6 +1,12 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { Book, Category } from '../../types';
 import { getBookCoverUrl, uploadBookCover, uploadBookFile } from '../../services/supabaseClient';
+import {
+  validateBookFormInput,
+  validateCoverFile,
+  validateBookDocumentFile,
+  recalculateBookStockOnEdit,
+} from '../../utils/libraryRules';
 import {
   BookOpen,
   Plus,
@@ -72,6 +78,20 @@ export const AdminBooksView: React.FC<AdminBooksViewProps> = ({
   const [uploadingCover, setUploadingCover] = useState(false);
   const [uploadingDoc, setUploadingDoc] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  // Reset state modal saat ditutup dari luar atau saat dibuka melalui pintasan sidebar/dashboard
+  useEffect(() => {
+    if (!isAddModalOpen) {
+      setEditingBook(null);
+      setFormError(null);
+    } else if (!editingBook) {
+      setFormData((prev) => ({
+        ...prev,
+        category_id: prev.category_id || categories[0]?.id || '',
+      }));
+    }
+  }, [isAddModalOpen, editingBook, categories]);
 
   const filteredBooks = useMemo(() => {
     return books.filter((b) => {
@@ -122,7 +142,14 @@ export const AdminBooksView: React.FC<AdminBooksViewProps> = ({
   // Upload cover ke bucket 'book-covers'
   const handleCoverUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = '';
     if (!file) return;
+
+    const validation = validateCoverFile(file);
+    if (!validation.valid) {
+      setFormError(validation.error || 'Format gambar sampul tidak valid.');
+      return;
+    }
 
     setUploadingCover(true);
     setFormError(null);
@@ -130,7 +157,7 @@ export const AdminBooksView: React.FC<AdminBooksViewProps> = ({
       const coverPath = await uploadBookCover(file);
       setFormData((prev) => ({ ...prev, cover_path: coverPath }));
     } catch (err: any) {
-      setFormError(`Gagal upload sampul: ${err.message}`);
+      setFormError(`Gagal mengunggah sampul: ${err?.message || 'Terjadi kesalahan unggahan.'}`);
     } finally {
       setUploadingCover(false);
     }
@@ -139,7 +166,14 @@ export const AdminBooksView: React.FC<AdminBooksViewProps> = ({
   // Upload PDF / EPUB ke bucket 'book-files'
   const handleDocUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = '';
     if (!file) return;
+
+    const validation = validateBookDocumentFile(file);
+    if (!validation.valid) {
+      setFormError(validation.error || 'Format dokumen buku tidak valid.');
+      return;
+    }
 
     setUploadingDoc(true);
     setFormError(null);
@@ -147,7 +181,7 @@ export const AdminBooksView: React.FC<AdminBooksViewProps> = ({
       const { filePath, fileType } = await uploadBookFile(file);
       setFormData((prev) => ({ ...prev, file_path: filePath, file_type: fileType }));
     } catch (err: any) {
-      setFormError(`Gagal upload dokumen buku: ${err.message}`);
+      setFormError(`Gagal mengunggah dokumen buku: ${err?.message || 'Terjadi kesalahan unggahan.'}`);
     } finally {
       setUploadingDoc(false);
     }
@@ -155,23 +189,46 @@ export const AdminBooksView: React.FC<AdminBooksViewProps> = ({
 
   const handleFormSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!formData.title.trim() || !formData.author.trim() || !formData.category_id) {
-      setFormError('Judul, penulis, dan kategori buku wajib diisi.');
+    const formValidation = validateBookFormInput(formData);
+    if (!formValidation.valid) {
+      setFormError(formValidation.error || 'Periksa kembali data formulir buku.');
       return;
+    }
+
+    let payload: Partial<Book> & typeof formData = { ...formData };
+    if (editingBook) {
+      const stockResult = recalculateBookStockOnEdit(
+        editingBook.total_copies,
+        editingBook.available_copies,
+        Number(formData.total_copies)
+      );
+      if (!stockResult.valid) {
+        setFormError(stockResult.error);
+        return;
+      }
+      payload = {
+        ...formData,
+        total_copies: stockResult.totalCopies,
+        available_copies: stockResult.availableCopies,
+      };
     }
 
     setIsSubmitting(true);
     setFormError(null);
     try {
       if (editingBook) {
-        await onUpdateBook(editingBook.id, formData);
+        await onUpdateBook(editingBook.id, payload);
       } else {
-        await onAddBook(formData);
+        await onAddBook(payload);
       }
       setAddModalOpen(false);
       setEditingBook(null);
+      setFormData({
+        ...initialFormState,
+        category_id: categories[0]?.id || '',
+      });
     } catch (err: any) {
-      setFormError(err.message || 'Gagal menyimpan data buku ke Supabase.');
+      setFormError(err?.message || 'Gagal menyimpan data buku ke database.');
     } finally {
       setIsSubmitting(false);
     }
@@ -180,11 +237,15 @@ export const AdminBooksView: React.FC<AdminBooksViewProps> = ({
   const handleDeleteConfirm = async () => {
     if (!deletingBook) return;
     setIsSubmitting(true);
+    setDeleteError(null);
     try {
       await onDeleteBook(deletingBook.id);
       setDeletingBook(null);
     } catch (err: any) {
-      alert(`Gagal menghapus buku: ${err.message}`);
+      setDeleteError(
+        err?.message ||
+          'Gagal menghapus buku. Jika buku memiliki riwayat peminjaman, gunakan fitur Arsipkan Buku.'
+      );
     } finally {
       setIsSubmitting(false);
     }
@@ -367,7 +428,10 @@ export const AdminBooksView: React.FC<AdminBooksViewProps> = ({
                           </button>
                         )}
                         <button
-                          onClick={() => setDeletingBook(book)}
+                          onClick={() => {
+                            setDeleteError(null);
+                            setDeletingBook(book);
+                          }}
                           className="p-1.5 rounded-lg text-slate-600 hover:text-rose-600 hover:bg-rose-50 transition-colors"
                           title="Hapus Buku"
                         >
@@ -477,12 +541,18 @@ export const AdminBooksView: React.FC<AdminBooksViewProps> = ({
                     onChange={(e) => setFormData({ ...formData, category_id: e.target.value })}
                     className="w-full px-3.5 py-2 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-900/30 bg-white"
                   >
+                    <option value="">-- Pilih Kategori --</option>
                     {categories.map((c) => (
                       <option key={c.id} value={c.id}>
                         {c.name}
                       </option>
                     ))}
                   </select>
+                  {categories.length === 0 && (
+                    <p className="text-[11px] text-amber-700 mt-1">
+                      Belum ada kategori buku. Tambahkan kategori terlebih dahulu di menu Kategori Buku.
+                    </p>
+                  )}
                 </div>
 
                 <div>
@@ -600,9 +670,18 @@ export const AdminBooksView: React.FC<AdminBooksViewProps> = ({
                 Apakah Anda yakin ingin menghapus buku <strong>"{deletingBook.title}"</strong> dari database? Tindakan ini tidak dapat dibatalkan.
               </p>
             </div>
+            {deleteError && (
+              <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs text-left flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+                <span>{deleteError}</span>
+              </div>
+            )}
             <div className="flex gap-2 justify-center pt-2">
               <button
-                onClick={() => setDeletingBook(null)}
+                onClick={() => {
+                  setDeleteError(null);
+                  setDeletingBook(null);
+                }}
                 className="px-4 py-2 rounded-xl bg-slate-100 text-slate-700 font-semibold text-xs"
               >
                 Batal

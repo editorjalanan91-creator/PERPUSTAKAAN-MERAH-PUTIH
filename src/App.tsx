@@ -19,6 +19,8 @@ import { AdminLoansView } from './views/admin/AdminLoansView';
 import { AdminUsersView } from './views/admin/AdminUsersView';
 import { AdminReportsView } from './views/admin/AdminReportsView';
 import { shouldRenderResetPasswordView } from './utils/authRecovery';
+import { BOOK_RETURN_NOTIFICATIONS, resolveBookReturnNotification } from './utils/libraryRules';
+import { supabase } from './services/supabaseClient';
 
 function LibraryApp() {
   const {
@@ -104,14 +106,14 @@ function LibraryApp() {
       const [booksData, catsData, loansData] = await Promise.all([
         libraryService.getBooks(),
         libraryService.getCategories(),
-        libraryService.getLoans(user.id, profile?.role === 'admin'),
+        libraryService.getLoans(user.id, isAdmin),
       ]);
 
       setBooks(booksData);
       setCategories(catsData);
       setLoans(loansData);
 
-      if (profile?.role === 'admin') {
+      if (isAdmin) {
         const [visitorsData, logsData] = await Promise.all([
           libraryService.getVisitors().catch(() => []),
           libraryService.getActivityLogs().catch(() => []),
@@ -125,7 +127,7 @@ function LibraryApp() {
     } finally {
       if (showLoadingSpinner) setIsDataLoading(false);
     }
-  }, [user, profile?.role, showToast]);
+  }, [user, isAdmin, showToast]);
 
   // Initial load and Realtime Subscriptions
   useEffect(() => {
@@ -147,7 +149,7 @@ function LibraryApp() {
 
   // Handle Book Loan Request (Status: pending)
   const handleBorrowBook = async (bookId: string, durationDays: number, notes?: string) => {
-    if (!user) return;
+    if (!user || isBorrowingBook) return;
     setIsBorrowingBook(true);
     try {
       await libraryService.requestLoan(user.id, bookId, durationDays, notes);
@@ -167,13 +169,77 @@ function LibraryApp() {
 
   // Handle Book Return (Visitor or Admin)
   const handleReturnBook = async (loanId: string) => {
+    if (isReturningBook) return;
     setIsReturningBook(true);
     try {
       await libraryService.returnLoan(loanId, user?.id);
-      showToast('Buku berhasil dikembalikan. Terima kasih!', 'success', 'Buku Dikembalikan');
+      showToast(
+        BOOK_RETURN_NOTIFICATIONS.SUCCESS.message,
+        BOOK_RETURN_NOTIFICATIONS.SUCCESS.type,
+        BOOK_RETURN_NOTIFICATIONS.SUCCESS.title
+      );
       await loadData(false);
     } catch (err: any) {
-      showToast(err?.message || 'Gagal memproses pengembalian buku.', 'error', 'Pengembalian Gagal');
+      console.error('[RETURN_BOOK_ERROR]', {
+        loanId,
+        userId: user?.id,
+        message: err?.message,
+        code: err?.code,
+        details: err?.details,
+        error: err,
+      });
+
+      // Catat error teknis ke server log tanpa menghalangi respons UI atau mengubah transaksi/stok
+      void (async () => {
+        try {
+          const {
+            data: { session },
+          } = await supabase.auth.getSession();
+          if (!session?.access_token) return;
+          await fetch('/api/loans/return-error-log', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${session.access_token}`,
+            },
+            body: JSON.stringify({
+              loanId,
+              code: err?.code,
+              message: err?.message,
+              details: err?.details,
+            }),
+          });
+        } catch (logErr) {
+          console.error('[RETURN_BOOK_SERVER_LOG_DISPATCH_ERROR]', logErr);
+        }
+      })();
+
+      let refreshedStatus: string | null | undefined;
+      if (user) {
+        try {
+          const latestLoans = await libraryService.getLoans(user.id, isAdmin);
+          setLoans(latestLoans);
+          const refreshedLoan = latestLoans.find((item) => item.id === loanId);
+          refreshedStatus = refreshedLoan?.status;
+        } catch (verifyErr) {
+          console.error('[RETURN_BOOK_STATUS_CHECK_ERROR]', { loanId, error: verifyErr });
+        }
+      }
+
+      const notification = resolveBookReturnNotification(refreshedStatus);
+      const isBusinessRuleError =
+        err?.code === 'INVALID_LOAN_STATUS' ||
+        err?.code === 'FORBIDDEN' ||
+        err?.code === 'LOAN_NOT_FOUND';
+
+      if (notification === BOOK_RETURN_NOTIFICATIONS.SUCCESS) {
+        showToast(notification.message, notification.type, notification.title);
+        await loadData(false);
+      } else if (isBusinessRuleError && err?.message) {
+        showToast(err.message, 'error', BOOK_RETURN_NOTIFICATIONS.UNCONFIRMED.title);
+      } else {
+        showToast(notification.message, notification.type, notification.title);
+      }
     } finally {
       setIsReturningBook(false);
     }
@@ -187,6 +253,7 @@ function LibraryApp() {
       await loadData(false);
     } catch (err: any) {
       showToast(err?.message || 'Gagal menyetujui peminjaman.', 'error');
+      throw err;
     }
   };
 
@@ -197,6 +264,7 @@ function LibraryApp() {
       await loadData(false);
     } catch (err: any) {
       showToast(err?.message || 'Gagal menolak peminjaman.', 'error');
+      throw err;
     }
   };
 
@@ -236,6 +304,23 @@ function LibraryApp() {
       await loadData(false);
     } catch (err: any) {
       showToast(err?.message || 'Gagal menghapus buku.', 'error');
+      throw err;
+    }
+  };
+
+  const handleToggleArchiveBook = async (id: string, isArchived: boolean) => {
+    try {
+      await libraryService.toggleArchiveBook(id, isArchived, user?.id);
+      showToast(
+        isArchived
+          ? 'Buku berhasil diarsipkan dan disembunyikan dari katalog pengunjung.'
+          : 'Buku berhasil dipulihkan kembali ke katalog aktif.',
+        'success',
+        isArchived ? 'Buku Diarsipkan' : 'Buku Dipulihkan'
+      );
+      await loadData(false);
+    } catch (err: any) {
+      showToast(err?.message || 'Gagal mengubah status arsip buku.', 'error');
       throw err;
     }
   };
@@ -316,6 +401,32 @@ function LibraryApp() {
     }
   };
 
+  const handleRestoreVisitor = async (id: string) => {
+    try {
+      const result = await libraryService.restoreVisitor(id);
+      setVisitors((prev) =>
+        prev.map((v) =>
+          v.id === id
+            ? {
+                ...v,
+                is_active: true,
+                archived_at: null,
+              }
+            : v
+        )
+      );
+      showToast(
+        result.message || 'Akun pengunjung berhasil diaktifkan kembali.',
+        'success',
+        'Akun Pengunjung Diaktifkan'
+      );
+      await loadData(false);
+    } catch (err: any) {
+      showToast(err?.message || 'Gagal mengaktifkan kembali akun pengunjung.', 'error');
+      throw err;
+    }
+  };
+
   // Loading Screen
   if (isLoading) {
     return (
@@ -387,6 +498,7 @@ function LibraryApp() {
               onAddBook={handleAddBook}
               onUpdateBook={handleUpdateBook}
               onDeleteBook={handleDeleteBook}
+              onToggleArchive={handleToggleArchiveBook}
               isAddModalOpen={isAddBookModalOpen}
               setIsAddModalOpen={setIsAddBookModalOpen}
             />
@@ -422,6 +534,7 @@ function LibraryApp() {
               currentUserId={user.id}
               onDeleteUser={handleDeleteVisitor}
               onArchiveUser={handleArchiveVisitor}
+              onRestoreUser={handleRestoreVisitor}
             />
           )}
 
