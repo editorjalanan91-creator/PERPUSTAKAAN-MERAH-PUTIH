@@ -10,16 +10,14 @@ import {
   RotateCcw,
   Search,
   User,
-  Calendar,
   AlertCircle,
   Check,
   X,
-  FileText,
 } from 'lucide-react';
 
 interface AdminLoansViewProps {
   loans: Loan[];
-  onApproveLoan: (loanId: string, durationDays: number, note?: string) => Promise<void>;
+  onApproveLoan: (loanId: string, note?: string) => Promise<void>;
   onRejectLoan: (loanId: string, reason: string) => Promise<void>;
   onReturnLoan: (loanId: string) => Promise<void>;
 }
@@ -35,7 +33,6 @@ export const AdminLoansView: React.FC<AdminLoansViewProps> = ({
 
   // Modals state
   const [approvingLoan, setApprovingLoan] = useState<Loan | null>(null);
-  const [approvalDays, setApprovalDays] = useState<number>(7);
   const [approvalNote, setApprovalNote] = useState<string>('');
 
   const [rejectingLoan, setRejectingLoan] = useState<Loan | null>(null);
@@ -70,7 +67,7 @@ export const AdminLoansView: React.FC<AdminLoansViewProps> = ({
     setModalError(null);
     setIsSubmitting(true);
     try {
-      await onApproveLoan(approvingLoan.id, approvalDays, approvalNote);
+      await onApproveLoan(approvingLoan.id, approvalNote);
       setApprovingLoan(null);
       setApprovalNote('');
     } catch (err: any) {
@@ -124,7 +121,7 @@ export const AdminLoansView: React.FC<AdminLoansViewProps> = ({
             Persetujuan &amp; Sirkulasi Peminjaman
           </h1>
           <p className="text-xs text-slate-500 mt-1">
-            Tinjau pengajuan peminjaman dari pengunjung, atur batas waktu pengembalian, dan konfirmasi buku yang telah kembali.
+            Tinjau pengajuan peminjaman dari pengunjung, setujui atau tolak permintaan, dan konfirmasi buku yang telah kembali.
           </p>
         </div>
 
@@ -162,6 +159,7 @@ export const AdminLoansView: React.FC<AdminLoansViewProps> = ({
             { id: 'expired', label: 'Kedaluwarsa' },
           ].map((tab) => (
             <button
+              type="button"
               key={tab.id}
               onClick={() => setStatusFilter(tab.id as any)}
               className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
@@ -194,7 +192,7 @@ export const AdminLoansView: React.FC<AdminLoansViewProps> = ({
                   <th className="py-3 px-4">Buku Yang Dipinjam</th>
                   <th className="py-3 px-4">Peminjam (Anggota)</th>
                   <th className="py-3 px-4">Tanggal Pengajuan</th>
-                  <th className="py-3 px-4">Jatuh Tempo</th>
+                  <th className="py-3 px-4">Tanggal Diproses</th>
                   <th className="py-3 px-4">Status</th>
                   <th className="py-3 px-4 text-right">Aksi Administrator</th>
                 </tr>
@@ -238,16 +236,24 @@ export const AdminLoansView: React.FC<AdminLoansViewProps> = ({
                       <td className="py-3 px-4 text-slate-600">
                         <p className="font-medium">{formatDateIndo(loan.requested_at)}</p>
                       </td>
-                      <td className="py-3 px-4">
-                        {loan.due_at ? (
-                          <div>
-                            <p className="font-bold text-blue-900">{formatDateIndo(loan.due_at)}</p>
-                            {new Date(loan.due_at).getTime() < new Date().getTime() && loan.status !== 'returned' && (
-                              <span className="text-[10px] font-bold text-rose-600">Terlewat Batas</span>
+                      <td className="py-3 px-4 text-slate-600">
+                        {loan.approved_at ? (
+                          <div className="space-y-0.5">
+                            <p className="font-semibold text-blue-900 tabular-nums">
+                              Disetujui: {formatDateIndo(loan.approved_at)}
+                            </p>
+                            {loan.returned_at && (
+                              <p className="text-[11px] text-emerald-700 tabular-nums">
+                                Kembali: {formatDateIndo(loan.returned_at)}
+                              </p>
                             )}
                           </div>
+                        ) : loan.status === 'rejected' ? (
+                          <span className="text-rose-700 font-medium tabular-nums">
+                            Ditolak: {formatDateIndo(loan.updated_at || loan.requested_at)}
+                          </span>
                         ) : (
-                          <span className="text-slate-400 italic">Belum ditentukan</span>
+                          <span className="text-slate-400 italic">Menunggu tinjauan</span>
                         )}
                       </td>
                       <td className="py-3 px-4">
@@ -291,10 +297,10 @@ export const AdminLoansView: React.FC<AdminLoansViewProps> = ({
                         {loan.status === 'pending' && (
                           <div className="flex items-center justify-end gap-1.5">
                             <button
+                              type="button"
                               onClick={() => {
                                 setModalError(null);
                                 setApprovingLoan(loan);
-                                setApprovalDays(7);
                                 setApprovalNote('');
                               }}
                               className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs flex items-center gap-1 shadow-sm cursor-pointer"
@@ -303,6 +309,7 @@ export const AdminLoansView: React.FC<AdminLoansViewProps> = ({
                               <span>Setujui</span>
                             </button>
                             <button
+                              type="button"
                               onClick={() => {
                                 setModalError(null);
                                 setRejectingLoan(loan);
@@ -318,6 +325,7 @@ export const AdminLoansView: React.FC<AdminLoansViewProps> = ({
 
                         {(loan.status === 'approved' || loan.status === 'borrowed') && (
                           <button
+                            type="button"
                             onClick={() => {
                               setModalError(null);
                               setReturningLoan(loan);
@@ -347,11 +355,13 @@ export const AdminLoansView: React.FC<AdminLoansViewProps> = ({
                 Setujui Peminjaman Buku
               </h3>
               <button
+                type="button"
+                aria-label="Tutup modal persetujuan"
                 onClick={() => {
                   setModalError(null);
                   setApprovingLoan(null);
                 }}
-                className="text-slate-400 hover:text-slate-600"
+                className="text-slate-400 hover:text-slate-600 cursor-pointer"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -367,28 +377,6 @@ export const AdminLoansView: React.FC<AdminLoansViewProps> = ({
             <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200 text-xs">
               <p className="font-bold text-slate-900">{approvingLoan.book?.title}</p>
               <p className="text-slate-500">Peminjam: {approvingLoan.profile?.full_name}</p>
-            </div>
-
-            <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1.5">
-                Tentukan Durasi Pinjaman:
-              </label>
-              <div className="grid grid-cols-4 gap-2">
-                {[3, 7, 10, 14].map((d) => (
-                  <button
-                    key={d}
-                    type="button"
-                    onClick={() => setApprovalDays(d)}
-                    className={`py-2 text-xs font-bold rounded-xl border cursor-pointer ${
-                      approvalDays === d
-                        ? 'bg-blue-900 text-white border-blue-900 shadow-sm'
-                        : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
-                    }`}
-                  >
-                    {d} Hari
-                  </button>
-                ))}
-              </div>
             </div>
 
             <div>
@@ -434,11 +422,13 @@ export const AdminLoansView: React.FC<AdminLoansViewProps> = ({
                 Tolak Peminjaman Buku
               </h3>
               <button
+                type="button"
+                aria-label="Tutup modal penolakan"
                 onClick={() => {
                   setModalError(null);
                   setRejectingLoan(null);
                 }}
-                className="text-slate-400 hover:text-slate-600"
+                className="text-slate-400 hover:text-slate-600 cursor-pointer"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -503,11 +493,13 @@ export const AdminLoansView: React.FC<AdminLoansViewProps> = ({
                 Konfirmasi Pengembalian Buku
               </h3>
               <button
+                type="button"
+                aria-label="Tutup modal konfirmasi pengembalian"
                 onClick={() => {
                   setModalError(null);
                   setReturningLoan(null);
                 }}
-                className="text-slate-400 hover:text-slate-600"
+                className="text-slate-400 hover:text-slate-600 cursor-pointer"
               >
                 <X className="w-4 h-4" />
               </button>

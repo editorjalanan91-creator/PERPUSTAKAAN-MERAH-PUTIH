@@ -9,6 +9,8 @@
 --   5. Menjaga keutuhan riwayat peminjaman (loans) & activity_logs
 -- ============================================================================
 
+BEGIN;
+
 -- 1. Tambahkan kolom status arsip dan flag Super Admin pada public.profiles
 --    is_super_admin bernilai default false sehingga tidak ada asumsi otomatis.
 ALTER TABLE public.profiles
@@ -33,6 +35,10 @@ CREATE INDEX IF NOT EXISTS idx_activity_logs_actor_created
   ON public.activity_logs (actor_id, created_at DESC);
 
 -- 3. Jaga keutuhan histori activity_logs apabila pengunjung tanpa riwayat pinjaman dihapus permanen
+--    - Pastikan actor_id dapat bernilai NULL
+--    - Periksa seluruh foreign key pada public.activity_logs.actor_id tanpa membatasi confrelid ke public.profiles
+--    - Hapus hanya foreign key yang terkait dengan kolom actor_id
+--    - Pertahankan referensi ke auth.users(id) dengan ON DELETE SET NULL
 ALTER TABLE public.activity_logs
   ALTER COLUMN actor_id DROP NOT NULL;
 
@@ -40,19 +46,27 @@ DO $$
 DECLARE
   v_con RECORD;
 BEGIN
+  -- Batasi penghapusan FK hanya pada constraint foreign key milik kolom activity_logs.actor_id,
+  -- tanpa membatasi confrelid (mencakup auth.users maupun target lain jika ada).
   FOR v_con IN
-    SELECT conname
-    FROM pg_constraint
-    WHERE conrelid = 'public.activity_logs'::regclass
-      AND confrelid = 'public.profiles'::regclass
-      AND contype = 'f'
+    SELECT DISTINCT con.conname
+    FROM pg_catalog.pg_constraint con
+    JOIN pg_catalog.pg_attribute att
+      ON att.attrelid = con.conrelid
+     AND att.attnum = con.conkey[1]
+    WHERE con.conrelid = 'public.activity_logs'::regclass
+      AND con.contype = 'f'
+      AND array_length(con.conkey, 1) = 1
+      AND att.attname = 'actor_id'
+      AND NOT att.attisdropped
+    ORDER BY con.conname
   LOOP
     EXECUTE format('ALTER TABLE public.activity_logs DROP CONSTRAINT %I', v_con.conname);
   END LOOP;
 
   ALTER TABLE public.activity_logs
     ADD CONSTRAINT activity_logs_actor_id_fkey
-    FOREIGN KEY (actor_id) REFERENCES public.profiles(id) ON DELETE SET NULL;
+    FOREIGN KEY (actor_id) REFERENCES auth.users(id) ON DELETE SET NULL;
 END;
 $$;
 
@@ -87,15 +101,27 @@ $$;
 CREATE OR REPLACE FUNCTION public.guard_profiles_sensitive_columns()
 RETURNS TRIGGER
 LANGUAGE plpgsql
-SECURITY DEFINER
+SECURITY INVOKER
 SET search_path = ''
 AS $$
 DECLARE
+  v_jwt_role TEXT := '';
   v_is_privileged_context BOOLEAN := false;
 BEGIN
+  v_jwt_role := COALESCE(
+    NULLIF(current_setting('request.jwt.claim.role', true), ''),
+    CASE
+      WHEN NULLIF(current_setting('request.jwt.claims', true), '') IS NOT NULL
+      THEN (current_setting('request.jwt.claims', true)::jsonb ->> 'role')
+      ELSE ''
+    END,
+    ''
+  );
+
   v_is_privileged_context := (
-    current_user IN ('postgres', 'supabase_admin', 'supabase_auth_admin', 'service_role')
-    OR COALESCE(current_setting('request.jwt.claim.role', true), '') = 'service_role'
+    current_user IN ('service_role', 'supabase_admin', 'supabase_auth_admin')
+    OR v_jwt_role = 'service_role'
+    OR (current_user = 'postgres' AND v_jwt_role = '')
   );
 
   IF v_is_privileged_context THEN
@@ -264,13 +290,47 @@ CREATE TRIGGER trg_protect_super_admin_auth_users
   FOR EACH ROW
   EXECUTE FUNCTION public.prevent_super_admin_auth_deletion();
 
--- 8. Verifikasi eksplisit pasca-pembuatan trigger (FAIL-CLOSED)
---    Memastikan kedua trigger perlindungan Super Admin benar-benar terpasang dan aktif.
+-- 8. Verifikasi eksplisit pasca-pembuatan trigger & constraint (FAIL-CLOSED)
+--    Memastikan FK activity_logs.actor_id -> auth.users(id) ON DELETE SET NULL
+--    serta kedua trigger perlindungan Super Admin benar-benar terpasang dan aktif.
 DO $$
 DECLARE
+  v_actor_id_nullable BOOLEAN := false;
+  v_actor_id_fk_ok BOOLEAN := false;
   v_auth_trigger_active BOOLEAN := false;
   v_profiles_trigger_active BOOLEAN := false;
 BEGIN
+  SELECT EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_attribute att
+    JOIN pg_catalog.pg_class c ON c.oid = att.attrelid
+    JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'public'
+      AND c.relname = 'activity_logs'
+      AND att.attname = 'actor_id'
+      AND NOT att.attisdropped
+      AND NOT att.attnotnull
+  )
+  INTO v_actor_id_nullable;
+
+  SELECT EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_constraint con
+    JOIN pg_catalog.pg_attribute att
+      ON att.attrelid = con.conrelid
+     AND att.attnum = con.conkey[1]
+    WHERE con.conrelid = 'public.activity_logs'::regclass
+      AND con.conname = 'activity_logs_actor_id_fkey'
+      AND con.confrelid = 'auth.users'::regclass
+      AND con.contype = 'f'
+      AND con.confdeltype = 'n'
+      AND con.convalidated
+      AND array_length(con.conkey, 1) = 1
+      AND att.attname = 'actor_id'
+      AND NOT att.attisdropped
+  )
+  INTO v_actor_id_fk_ok;
+
   SELECT EXISTS (
     SELECT 1
     FROM pg_catalog.pg_trigger t
@@ -280,7 +340,7 @@ BEGIN
       AND c.relname = 'users'
       AND t.tgname = 'trg_protect_super_admin_auth_users'
       AND NOT t.tgisinternal
-      AND t.tgenabled <> 'D'
+      AND t.tgenabled IN ('O', 'A', 'R')
   )
   INTO v_auth_trigger_active;
 
@@ -293,19 +353,29 @@ BEGIN
       AND c.relname = 'profiles'
       AND t.tgname = 'trg_protect_super_admin_profiles'
       AND NOT t.tgisinternal
-      AND t.tgenabled <> 'D'
+      AND t.tgenabled IN ('O', 'A', 'R')
   )
   INTO v_profiles_trigger_active;
 
+  IF NOT v_actor_id_nullable THEN
+    RAISE EXCEPTION 'FAIL-CLOSED: Kolom public.activity_logs.actor_id wajib mengizinkan nilai NULL. Seluruh migrasi dibatalkan.';
+  END IF;
+
+  IF NOT v_actor_id_fk_ok THEN
+    RAISE EXCEPTION 'FAIL-CLOSED: Constraint activity_logs_actor_id_fkey (actor_id -> auth.users(id) ON DELETE SET NULL) tidak terpasang dengan benar. Seluruh migrasi dibatalkan.';
+  END IF;
+
   IF NOT v_auth_trigger_active THEN
-    RAISE EXCEPTION 'FAIL-CLOSED: Trigger perlindungan Super Admin trg_protect_super_admin_auth_users pada auth.users tidak terpasang atau non-aktif. Migrasi dibatalkan.';
+    RAISE EXCEPTION 'FAIL-CLOSED: Trigger perlindungan Super Admin trg_protect_super_admin_auth_users pada auth.users tidak terpasang atau non-aktif. Seluruh migrasi dibatalkan.';
   END IF;
 
   IF NOT v_profiles_trigger_active THEN
-    RAISE EXCEPTION 'FAIL-CLOSED: Trigger perlindungan Super Admin trg_protect_super_admin_profiles pada public.profiles tidak terpasang atau non-aktif. Migrasi dibatalkan.';
+    RAISE EXCEPTION 'FAIL-CLOSED: Trigger perlindungan Super Admin trg_protect_super_admin_profiles pada public.profiles tidak terpasang atau non-aktif. Seluruh migrasi dibatalkan.';
   END IF;
 END;
 $$;
+
+COMMIT;
 
 -- ============================================================================
 -- CATATAN VERIFIKASI UID SUPER ADMIN (TIDAK OTOMATIS):

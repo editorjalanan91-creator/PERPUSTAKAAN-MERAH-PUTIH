@@ -134,6 +134,7 @@ export const UserProfileView: React.FC = () => {
         </div>
 
         <button
+          type="button"
           onClick={() => logout()}
           className="px-4 py-2 rounded-xl bg-rose-950/40 hover:bg-rose-900/60 text-rose-300 border border-rose-800/60 text-xs font-semibold flex items-center gap-2 transition-colors cursor-pointer shrink-0"
         >

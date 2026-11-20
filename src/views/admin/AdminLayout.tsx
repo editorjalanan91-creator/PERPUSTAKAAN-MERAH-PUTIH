@@ -84,6 +84,7 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
             const isActive = currentTab === item.id;
             return (
               <button
+                type="button"
                 key={item.id}
                 onClick={() => handleTabClick(item.id)}
                 className={`w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
@@ -109,6 +110,7 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
             Pintasan Cepat
           </div>
           <button
+            type="button"
             onClick={onOpenAddBookModal}
             className="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-xs font-semibold text-amber-300 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-400/30 transition-all cursor-pointer"
           >
@@ -132,6 +134,7 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
           </div>
 
           <button
+            type="button"
             onClick={() => logout()}
             className="w-full flex items-center justify-center gap-2 py-2 px-3 rounded-xl bg-slate-800 hover:bg-rose-950/60 text-slate-300 hover:text-rose-300 border border-slate-700 hover:border-rose-800 text-xs font-semibold transition-all cursor-pointer"
           >
@@ -154,8 +157,10 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
         </div>
 
         <button
+          type="button"
+          aria-label={mobileSidebarOpen ? 'Tutup menu navigasi' : 'Buka menu navigasi'}
           onClick={() => setMobileSidebarOpen(!mobileSidebarOpen)}
-          className="p-2 rounded-xl bg-slate-800 text-slate-300 hover:text-white"
+          className="p-2 rounded-xl bg-slate-800 text-slate-300 hover:text-white cursor-pointer"
         >
           {mobileSidebarOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
         </button>
@@ -169,6 +174,7 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
             const isActive = currentTab === item.id;
             return (
               <button
+                type="button"
                 key={item.id}
                 onClick={() => handleTabClick(item.id)}
                 className={`w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-xs font-semibold ${
@@ -192,6 +198,7 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
 
           <div className="pt-3 border-t border-slate-800 space-y-2">
             <button
+              type="button"
               onClick={() => {
                 setMobileSidebarOpen(false);
                 onOpenAddBookModal();
@@ -203,6 +210,7 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
             </button>
             {onPreviewVisitorCatalog && (
               <button
+                type="button"
                 onClick={() => {
                   setMobileSidebarOpen(false);
                   onPreviewVisitorCatalog();
@@ -214,6 +222,7 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
               </button>
             )}
             <button
+              type="button"
               onClick={() => logout()}
               className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl bg-rose-950/40 text-rose-300 border border-rose-800/60 text-xs font-semibold"
             >
@@ -239,6 +248,7 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
           <div className="flex items-center gap-3">
             {onPreviewVisitorCatalog && (
               <button
+                type="button"
                 onClick={onPreviewVisitorCatalog}
                 className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold transition-colors cursor-pointer"
               >

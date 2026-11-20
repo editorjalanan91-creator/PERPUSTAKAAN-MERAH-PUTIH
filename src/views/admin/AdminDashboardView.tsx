@@ -10,11 +10,8 @@ import {
   Bookmark,
   Plus,
   ArrowRight,
-  TrendingUp,
   Clock,
   CheckCircle2,
-  AlertTriangle,
-  History,
   Activity,
 } from 'lucide-react';
 
@@ -26,7 +23,7 @@ interface AdminDashboardViewProps {
   activityLogs?: ActivityLog[];
   onNavigateTab: (tab: 'books' | 'categories' | 'loans' | 'users' | 'reports') => void;
   onOpenAddBookModal: () => void;
-  onApproveLoan?: (loanId: string, durationDays?: number, adminNote?: string) => Promise<void>;
+  onApproveLoan?: (loanId: string, adminNote?: string) => Promise<void>;
   onRejectLoan?: (loanId: string, reason?: string) => Promise<void>;
 }
 
@@ -73,6 +70,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
 
           <div className="flex items-center gap-2">
             <button
+              type="button"
               onClick={onOpenAddBookModal}
               className="py-2.5 px-4 rounded-xl font-bold text-xs bg-amber-400 hover:bg-amber-300 text-slate-950 shadow-md transition-all flex items-center gap-2 cursor-pointer shrink-0"
             >
@@ -86,9 +84,10 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
       {/* 4 Metric Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
         {/* Total Buku */}
-        <div
+        <button
+          type="button"
           onClick={() => onNavigateTab('books')}
-          className="bg-white p-5 rounded-2xl border border-slate-200/90 shadow-sm hover:shadow-md hover:border-blue-900/30 transition-all cursor-pointer group"
+          className="bg-white p-5 rounded-2xl border border-slate-200/90 shadow-sm hover:shadow-md hover:border-blue-900/30 transition-all cursor-pointer group text-left w-full"
         >
           <div className="flex items-center justify-between">
             <span className="text-xs font-bold uppercase tracking-wider text-slate-500">
@@ -99,19 +98,20 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
             </div>
           </div>
           <div className="mt-4">
-            <span className="text-3xl font-black text-slate-900">{totalBooks}</span>
+            <span className="text-3xl font-black text-slate-900 tabular-nums">{totalBooks}</span>
             <span className="text-xs text-slate-500 ml-2">Judul</span>
           </div>
           <p className="text-xs text-blue-900 font-medium mt-3 flex items-center gap-1">
             <span>Buka Manajemen Buku</span>
             <ArrowRight className="w-3.5 h-3.5" />
           </p>
-        </div>
+        </button>
 
         {/* Total Pengunjung */}
-        <div
+        <button
+          type="button"
           onClick={() => onNavigateTab('users')}
-          className="bg-white p-5 rounded-2xl border border-slate-200/90 shadow-sm hover:shadow-md hover:border-amber-400/50 transition-all cursor-pointer group"
+          className="bg-white p-5 rounded-2xl border border-slate-200/90 shadow-sm hover:shadow-md hover:border-amber-400/50 transition-all cursor-pointer group text-left w-full"
         >
           <div className="flex items-center justify-between">
             <span className="text-xs font-bold uppercase tracking-wider text-slate-500">
@@ -122,19 +122,20 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
             </div>
           </div>
           <div className="mt-4">
-            <span className="text-3xl font-black text-slate-900">{totalVisitors}</span>
+            <span className="text-3xl font-black text-slate-900 tabular-nums">{totalVisitors}</span>
             <span className="text-xs text-slate-500 ml-2">Anggota Terdaftar</span>
           </div>
           <p className="text-xs text-amber-700 font-medium mt-3 flex items-center gap-1">
             <span>Lihat Daftar Pengunjung</span>
             <ArrowRight className="w-3.5 h-3.5" />
           </p>
-        </div>
+        </button>
 
         {/* Kategori Buku */}
-        <div
+        <button
+          type="button"
           onClick={() => onNavigateTab('categories')}
-          className="bg-white p-5 rounded-2xl border border-slate-200/90 shadow-sm hover:shadow-md hover:border-slate-400 transition-all cursor-pointer group"
+          className="bg-white p-5 rounded-2xl border border-slate-200/90 shadow-sm hover:shadow-md hover:border-slate-400 transition-all cursor-pointer group text-left w-full"
         >
           <div className="flex items-center justify-between">
             <span className="text-xs font-bold uppercase tracking-wider text-slate-500">
@@ -145,19 +146,20 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
             </div>
           </div>
           <div className="mt-4">
-            <span className="text-3xl font-black text-slate-900">{totalCategories}</span>
+            <span className="text-3xl font-black text-slate-900 tabular-nums">{totalCategories}</span>
             <span className="text-xs text-slate-500 ml-2">Klasifikasi</span>
           </div>
           <p className="text-xs text-purple-800 font-medium mt-3 flex items-center gap-1">
             <span>Kelola Kategori</span>
             <ArrowRight className="w-3.5 h-3.5" />
           </p>
-        </div>
+        </button>
 
         {/* Peminjaman Pending / Aktif */}
-        <div
+        <button
+          type="button"
           onClick={() => onNavigateTab('loans')}
-          className="bg-white p-5 rounded-2xl border border-slate-200/90 shadow-sm hover:shadow-md hover:border-emerald-500/40 transition-all cursor-pointer group"
+          className="bg-white p-5 rounded-2xl border border-slate-200/90 shadow-sm hover:shadow-md hover:border-emerald-500/40 transition-all cursor-pointer group text-left w-full"
         >
           <div className="flex items-center justify-between">
             <span className="text-xs font-bold uppercase tracking-wider text-slate-500">
@@ -168,14 +170,14 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
             </div>
           </div>
           <div className="mt-4 flex items-baseline gap-2">
-            <span className="text-3xl font-black text-amber-600">{pendingLoans}</span>
-            <span className="text-xs text-slate-500">Menunggu • {activeLoans} Aktif</span>
+            <span className="text-3xl font-black text-amber-600 tabular-nums">{pendingLoans}</span>
+            <span className="text-xs text-slate-500 tabular-nums">Menunggu • {activeLoans} Aktif</span>
           </div>
           <p className="text-xs text-emerald-700 font-medium mt-3 flex items-center gap-1">
             <span>Tinjau Peminjaman</span>
             <ArrowRight className="w-3.5 h-3.5" />
           </p>
-        </div>
+        </button>
       </div>
 
       {/* Main Grid: Newest Books & Pending Requests */}
@@ -191,6 +193,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
               <p className="text-xs text-slate-500">Buku yang baru ditambahkan ke database Supabase</p>
             </div>
             <button
+              type="button"
               onClick={() => onNavigateTab('books')}
               className="text-xs font-semibold text-blue-900 hover:text-blue-700 flex items-center gap-1 cursor-pointer"
             >
@@ -278,6 +281,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                 <p className="text-xs text-slate-500">Memerlukan persetujuan administrator</p>
               </div>
               <button
+                type="button"
                 onClick={() => onNavigateTab('loans')}
                 className="text-xs font-semibold text-blue-900 hover:text-blue-700 flex items-center gap-1 cursor-pointer"
               >
@@ -303,6 +307,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                       </span>
                     </div>
                     <button
+                      type="button"
                       onClick={() => onNavigateTab('loans')}
                       className="px-2.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold text-xs shrink-0 shadow-sm cursor-pointer"
                     >
@@ -337,10 +342,10 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
             {activityLogs.length > 0 ? (
               <div className="space-y-2.5 max-h-52 overflow-y-auto pr-1">
                 {activityLogs.slice(0, 6).map((log) => (
-                  <div key={log.id} className="p-2.5 rounded-xl bg-slate-50 border border-slate-150 text-[11px] flex items-center justify-between">
+                  <div key={log.id} className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-[11px] flex items-center justify-between">
                     <div className="min-w-0 pr-2">
                       <p className="font-semibold text-slate-800 capitalize truncate">
-                        {log.action.replace('_', ' ')}
+                        {log.action.replace(/_/g, ' ')}
                       </p>
                       <span className="text-[10px] text-slate-400 uppercase font-mono">
                         {log.entity_type}

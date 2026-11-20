@@ -15,12 +15,9 @@ import {
   Trash2,
   Archive,
   ArchiveRestore,
-  Calendar,
-  Building2,
   FileText,
   Upload,
   X,
-  CheckCircle2,
   AlertTriangle,
   FileUp,
 } from 'lucide-react';
@@ -265,6 +262,7 @@ export const AdminBooksView: React.FC<AdminBooksViewProps> = ({
         </div>
 
         <button
+          type="button"
           onClick={openCreateModal}
           className="inline-flex items-center gap-2 py-2.5 px-4 rounded-xl bg-blue-900 hover:bg-blue-950 text-amber-300 font-bold text-xs shadow-md transition-all cursor-pointer self-start sm:self-auto"
         >
@@ -318,6 +316,7 @@ export const AdminBooksView: React.FC<AdminBooksViewProps> = ({
             Katalog buku masih kosong di database Supabase. Klik tombol di bawah untuk menambahkan buku pertama beserta sampul dan file digitalnya.
           </p>
           <button
+            type="button"
             onClick={openCreateModal}
             className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-blue-900 hover:bg-blue-950 text-amber-300 font-bold text-xs shadow-md transition-all cursor-pointer"
           >
@@ -408,17 +407,21 @@ export const AdminBooksView: React.FC<AdminBooksViewProps> = ({
                       </td>
                       <td className="py-3 px-4 text-right space-x-1 whitespace-nowrap">
                         <button
+                          type="button"
                           onClick={() => openEditModal(book)}
-                          className="p-1.5 rounded-lg text-slate-600 hover:text-blue-900 hover:bg-slate-100 transition-colors"
+                          className="p-1.5 rounded-lg text-slate-600 hover:text-blue-900 hover:bg-slate-100 transition-colors cursor-pointer"
                           title="Ubah Buku"
+                          aria-label={`Ubah buku ${book.title}`}
                         >
                           <Edit2 className="w-3.5 h-3.5" />
                         </button>
                         {onToggleArchive && (
                           <button
+                            type="button"
                             onClick={() => onToggleArchive(book.id, !book.is_archived)}
-                            className="p-1.5 rounded-lg text-slate-600 hover:text-amber-800 hover:bg-slate-100 transition-colors"
+                            className="p-1.5 rounded-lg text-slate-600 hover:text-amber-800 hover:bg-slate-100 transition-colors cursor-pointer"
                             title={book.is_archived ? 'Pulihkan dari Arsip' : 'Arsipkan Buku'}
+                            aria-label={book.is_archived ? `Pulihkan ${book.title} dari arsip` : `Arsipkan buku ${book.title}`}
                           >
                             {book.is_archived ? (
                               <ArchiveRestore className="w-3.5 h-3.5 text-amber-600" />
@@ -428,12 +431,14 @@ export const AdminBooksView: React.FC<AdminBooksViewProps> = ({
                           </button>
                         )}
                         <button
+                          type="button"
                           onClick={() => {
                             setDeleteError(null);
                             setDeletingBook(book);
                           }}
-                          className="p-1.5 rounded-lg text-slate-600 hover:text-rose-600 hover:bg-rose-50 transition-colors"
+                          className="p-1.5 rounded-lg text-slate-600 hover:text-rose-600 hover:bg-rose-50 transition-colors cursor-pointer"
                           title="Hapus Buku"
+                          aria-label={`Hapus buku ${book.title}`}
                         >
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
@@ -459,8 +464,10 @@ export const AdminBooksView: React.FC<AdminBooksViewProps> = ({
                 </h3>
               </div>
               <button
+                type="button"
                 onClick={() => setAddModalOpen(false)}
-                className="p-1 text-slate-400 hover:text-white"
+                aria-label="Tutup modal buku"
+                className="p-1 text-slate-400 hover:text-white cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -678,18 +685,20 @@ export const AdminBooksView: React.FC<AdminBooksViewProps> = ({
             )}
             <div className="flex gap-2 justify-center pt-2">
               <button
+                type="button"
                 onClick={() => {
                   setDeleteError(null);
                   setDeletingBook(null);
                 }}
-                className="px-4 py-2 rounded-xl bg-slate-100 text-slate-700 font-semibold text-xs"
+                className="px-4 py-2 rounded-xl bg-slate-100 text-slate-700 font-semibold text-xs cursor-pointer"
               >
                 Batal
               </button>
               <button
+                type="button"
                 onClick={handleDeleteConfirm}
                 disabled={isSubmitting}
-                className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs"
+                className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs cursor-pointer"
               >
                 {isSubmitting ? 'Menghapus...' : 'Ya, Hapus Buku'}
               </button>

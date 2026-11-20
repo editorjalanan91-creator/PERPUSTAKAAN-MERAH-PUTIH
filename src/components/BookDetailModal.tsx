@@ -1,13 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import { Book, Loan } from '../types';
-import { getBookCoverUrl, getBookFileSignedUrl } from '../services/supabaseClient';
+import { getBookCoverUrl } from '../services/supabaseClient';
+import { libraryService } from '../services/libraryService';
 import {
   X,
   BookOpen,
   Calendar,
   Building2,
   Bookmark,
-  Layers,
   CheckCircle2,
   AlertCircle,
   Hash,
@@ -20,7 +20,7 @@ import {
 interface BookDetailModalProps {
   book: Book | null;
   onClose: () => void;
-  onBorrow: (bookId: string, durationDays: number, notes?: string) => Promise<void>;
+  onBorrow: (bookId: string, notes?: string) => Promise<void>;
   isBorrowing?: boolean;
   userLoan?: Loan | null;
 }
@@ -50,11 +50,11 @@ export const BookDetailModal: React.FC<BookDetailModalProps> = ({
   const isAvailable = (book.available_copies ?? 0) > 0;
   const coverUrl = getBookCoverUrl(book.cover_path);
 
-  // Periksa apakah pengunjung memiliki hak akses membaca (peminjaman approved / borrowed dan belum expired)
-  const isApprovedToRead =
-    userLoan &&
-    (userLoan.status === 'approved' || userLoan.status === 'borrowed') &&
-    (!userLoan.due_at || new Date(userLoan.due_at).getTime() >= new Date().getTime());
+  // Periksa apakah pengunjung memiliki hak akses membaca (peminjaman approved / borrowed)
+  const isApprovedStatus = Boolean(
+    userLoan && (userLoan.status === 'approved' || userLoan.status === 'borrowed')
+  );
+  const isApprovedToRead = isApprovedStatus;
 
   const isPending = userLoan && userLoan.status === 'pending';
 
@@ -67,12 +67,8 @@ export const BookDetailModal: React.FC<BookDetailModalProps> = ({
     }
     setIsLoadingReader(true);
     try {
-      const signedUrl = await getBookFileSignedUrl(book.file_path, 7200); // 2 jam masa berlaku
-      if (signedUrl) {
-        setReadingUrl(signedUrl);
-      } else {
-        setReaderError('Gagal membuat tautan akses buku privat. Hubungi administrator.');
-      }
+      const signedUrl = await libraryService.getBookDigitalReadUrl(book.id, book.file_path);
+      setReadingUrl(signedUrl);
     } catch (err: any) {
       setReaderError(err?.message || 'Gagal membuka dokumen digital buku.');
     } finally {
@@ -82,8 +78,8 @@ export const BookDetailModal: React.FC<BookDetailModalProps> = ({
 
   const handleSubmitBorrow = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!isAvailable || isBorrowing || isPending || isApprovedToRead) return;
-    await onBorrow(book.id, 7, notes);
+    if (!isAvailable || isBorrowing || isPending || isApprovedStatus) return;
+    await onBorrow(book.id, notes);
   };
 
   return (
@@ -96,6 +92,7 @@ export const BookDetailModal: React.FC<BookDetailModalProps> = ({
             <h2 className="font-bold text-base sm:text-lg">Detail Informasi Koleksi Buku</h2>
           </div>
           <button
+            type="button"
             onClick={onClose}
             className="p-1.5 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
             aria-label="Tutup modal"
@@ -146,11 +143,9 @@ export const BookDetailModal: React.FC<BookDetailModalProps> = ({
                     <ShieldCheck className="w-4 h-4 text-emerald-600" />
                     <span>Peminjaman Aktif Disetujui</span>
                   </div>
-                  {userLoan?.due_at && (
-                    <p className="text-[11px] text-emerald-700 mt-1">
-                      Batas Akses: {new Date(userLoan.due_at).toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}
-                    </p>
-                  )}
+                  <p className="text-[11px] text-emerald-700 mt-1">
+                    Anda dapat membaca koleksi ini dan mengembalikannya kapan saja setelah selesai.
+                  </p>
                 </div>
               )}
 
@@ -181,7 +176,7 @@ export const BookDetailModal: React.FC<BookDetailModalProps> = ({
                 </p>
 
                 {/* Specs Grid */}
-                <div className="grid grid-cols-2 gap-3 mt-6 p-4 rounded-2xl bg-slate-50 border border-slate-150">
+                <div className="grid grid-cols-2 gap-3 mt-6 p-4 rounded-2xl bg-slate-50 border border-slate-200">
                   <div className="flex items-start gap-2.5">
                     <Building2 className="w-4 h-4 text-slate-400 mt-0.5 shrink-0" />
                     <div>

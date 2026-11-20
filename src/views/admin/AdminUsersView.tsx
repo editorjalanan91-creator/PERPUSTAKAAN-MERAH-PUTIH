@@ -15,6 +15,10 @@ import {
   ShieldAlert,
   Loader2,
   RotateCcw,
+  UserPlus,
+  Pencil,
+  Eye,
+  EyeOff,
 } from 'lucide-react';
 
 export interface VisitorWithStats extends Profile {
@@ -26,16 +30,26 @@ export interface VisitorWithStats extends Profile {
 interface AdminUsersViewProps {
   users: VisitorWithStats[];
   currentUserId?: string;
+  onCreateUser?: (data: {
+    full_name: string;
+    username: string;
+    email: string;
+    password: string;
+  }) => Promise<void>;
+  onUpdateUser?: (id: string, data: { full_name: string; username: string }) => Promise<void>;
   onDeleteUser?: (id: string) => Promise<void>;
   onArchiveUser?: (id: string) => Promise<void>;
   onRestoreUser?: (id: string) => Promise<void>;
 }
 
 type VisitorModalMode = 'delete' | 'archive' | 'restore';
+type VisitorFormModalMode = 'create' | 'edit' | null;
 
 export const AdminUsersView: React.FC<AdminUsersViewProps> = ({
   users,
   currentUserId,
+  onCreateUser,
+  onUpdateUser,
   onDeleteUser,
   onArchiveUser,
   onRestoreUser,
@@ -48,6 +62,17 @@ export const AdminUsersView: React.FC<AdminUsersViewProps> = ({
   const [blockedActiveLoansCount, setBlockedActiveLoansCount] = useState<number>(0);
   const [modalError, setModalError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Add / Edit Visitor Form Modal State
+  const [formModalMode, setFormModalMode] = useState<VisitorFormModalMode>(null);
+  const [editingUser, setEditingUser] = useState<VisitorWithStats | null>(null);
+  const [formFullName, setFormFullName] = useState('');
+  const [formUsername, setFormUsername] = useState('');
+  const [formEmail, setFormEmail] = useState('');
+  const [formPassword, setFormPassword] = useState('');
+  const [showFormPassword, setShowFormPassword] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
+  const [isFormSubmitting, setIsFormSubmitting] = useState(false);
 
   const activeVisitorsCount = users.filter((u) => !isVisitorArchived(u)).length;
   const archivedVisitorsCount = users.length - activeVisitorsCount;
@@ -96,6 +121,104 @@ export const AdminUsersView: React.FC<AdminUsersViewProps> = ({
     setRequiresArchiveFallback(false);
     setBlockedActiveLoansCount(0);
     setModalError(null);
+  };
+
+  const openCreateModal = () => {
+    setFormModalMode('create');
+    setEditingUser(null);
+    setFormFullName('');
+    setFormUsername('');
+    setFormEmail('');
+    setFormPassword('');
+    setShowFormPassword(false);
+    setFormError(null);
+  };
+
+  const openEditModal = (visitor: VisitorWithStats) => {
+    setFormModalMode('edit');
+    setEditingUser(visitor);
+    setFormFullName(visitor.full_name || '');
+    setFormUsername(visitor.username || '');
+    setFormEmail(visitor.email || '');
+    setFormPassword('');
+    setShowFormPassword(false);
+    setFormError(null);
+  };
+
+  const closeFormModal = () => {
+    if (isFormSubmitting) return;
+    setFormModalMode(null);
+    setEditingUser(null);
+    setFormError(null);
+  };
+
+  const handleSubmitVisitorForm = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (isFormSubmitting || !formModalMode) return;
+
+    const cleanFullName = formFullName.trim();
+    const cleanUsername = formUsername.trim();
+    const cleanEmail = formEmail.trim().toLowerCase();
+
+    if (cleanFullName.length < 3) {
+      setFormError('Nama lengkap pengunjung minimal 3 karakter.');
+      return;
+    }
+    if (!/^[a-zA-Z0-9_]{3,20}$/.test(cleanUsername)) {
+      setFormError('Username harus 3-20 karakter alfanumerik (huruf, angka, atau garis bawah).');
+      return;
+    }
+    const lowerUname = cleanUsername.toLowerCase();
+    if (lowerUname === 'admin' || lowerUname === 'super_admin' || lowerUname === 'superadmin') {
+      setFormError('Username tersebut dicadangkan untuk akun sistem.');
+      return;
+    }
+
+    if (formModalMode === 'create') {
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+        setFormError('Format alamat email pengunjung tidak valid.');
+        return;
+      }
+      if (formPassword.length < 6) {
+        setFormError('Kata sandi awal pengunjung minimal 6 karakter.');
+        return;
+      }
+      if (!onCreateUser) return;
+
+      setIsFormSubmitting(true);
+      setFormError(null);
+      try {
+        await onCreateUser({
+          full_name: cleanFullName,
+          username: cleanUsername,
+          email: cleanEmail,
+          password: formPassword,
+        });
+        setFormModalMode(null);
+      } catch (err: any) {
+        setFormError(err?.message || 'Gagal menambahkan akun pengunjung.');
+      } finally {
+        setIsFormSubmitting(false);
+      }
+      return;
+    }
+
+    if (formModalMode === 'edit' && editingUser && onUpdateUser) {
+      setIsFormSubmitting(true);
+      setFormError(null);
+      try {
+        await onUpdateUser(editingUser.id, {
+          full_name: cleanFullName,
+          username: cleanUsername,
+        });
+        setFormModalMode(null);
+        setEditingUser(null);
+      } catch (err: any) {
+        setFormError(err?.message || 'Gagal memperbarui data pengunjung.');
+      } finally {
+        setIsFormSubmitting(false);
+      }
+    }
   };
 
   const handleConfirmDelete = async () => {
@@ -196,6 +319,16 @@ export const AdminUsersView: React.FC<AdminUsersViewProps> = ({
               {archivedVisitorsCount} Diarsipkan
             </span>
           )}
+          {onCreateUser && (
+            <button
+              type="button"
+              onClick={openCreateModal}
+              className="inline-flex items-center gap-2 py-2 px-4 rounded-xl bg-blue-900 hover:bg-blue-950 text-amber-300 font-bold text-xs shadow-md transition-all cursor-pointer"
+            >
+              <UserPlus className="w-4 h-4" />
+              <span>Tambah Pengunjung</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -252,7 +385,7 @@ export const AdminUsersView: React.FC<AdminUsersViewProps> = ({
                   <th className="py-3 px-4 font-semibold">Tanggal Registrasi</th>
                   <th className="py-3 px-4 font-semibold text-center">Pinjaman Aktif</th>
                   <th className="py-3 px-4 font-semibold text-center">Total Riwayat</th>
-                  {(onDeleteUser || onArchiveUser || onRestoreUser) && (
+                  {(onUpdateUser || onDeleteUser || onArchiveUser || onRestoreUser) && (
                     <th className="py-3 px-4 font-semibold text-right">Aksi</th>
                   )}
                 </tr>
@@ -325,42 +458,63 @@ export const AdminUsersView: React.FC<AdminUsersViewProps> = ({
                       <td className="py-3.5 px-4 text-center font-semibold text-slate-700">
                         {u.totalLoans ?? 0} transaksi
                       </td>
-                      {(onDeleteUser || onArchiveUser || onRestoreUser) && (
+                      {(onUpdateUser || onDeleteUser || onArchiveUser || onRestoreUser) && (
                         <td className="py-3.5 px-4 text-right">
-                          {archived ? (
-                            onRestoreUser && (
+                          <div className="inline-flex items-center justify-end gap-1.5">
+                            {onUpdateUser && (
                               <button
                                 type="button"
-                                onClick={() => openRestoreModal(u)}
+                                onClick={() => openEditModal(u)}
                                 disabled={Boolean(isProtectedAccount)}
-                                aria-label={`Aktifkan kembali akun ${u.full_name}`}
-                                title="Aktifkan Kembali Pengunjung"
-                                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 font-semibold text-[11px] disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer"
+                                aria-label={`Edit akun ${u.full_name}`}
+                                title={
+                                  isProtectedAccount
+                                    ? 'Akun administrator / Super Admin dilindungi dan tidak dapat diubah di menu ini'
+                                    : 'Edit Data Pengunjung'
+                                }
+                                className="p-2 rounded-lg text-slate-500 hover:text-blue-900 hover:bg-blue-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer"
                               >
-                                <RotateCcw className="w-3.5 h-3.5" />
-                                <span>Aktifkan Kembali</span>
+                                <Pencil className="w-4 h-4" />
                               </button>
-                            )
-                          ) : (
-                            <button
-                              type="button"
-                              onClick={() => openDeleteModal(u)}
-                              disabled={Boolean(isProtectedAccount)}
-                              aria-label={`Hapus akun ${u.full_name}`}
-                              title={
-                                isProtectedAccount
-                                  ? 'Akun administrator / Super Admin dilindungi dan tidak dapat dihapus'
-                                  : (u.activeLoans ?? 0) > 0
-                                    ? 'Pengunjung memiliki pinjaman aktif yang harus diselesaikan'
-                                    : (u.totalLoans ?? 0) > 0
-                                      ? 'Arsipkan / Kelola Penghapusan Akun Pengunjung'
-                                      : 'Hapus Akun Pengunjung'
-                              }
-                              className="p-2 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer"
-                            >
-                              <Trash2 className="w-4 h-4" />
-                            </button>
-                          )}
+                            )}
+
+                            {archived ? (
+                              onRestoreUser && (
+                                <button
+                                  type="button"
+                                  onClick={() => openRestoreModal(u)}
+                                  disabled={Boolean(isProtectedAccount)}
+                                  aria-label={`Aktifkan kembali akun ${u.full_name}`}
+                                  title="Aktifkan Kembali Pengunjung"
+                                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 font-semibold text-[11px] disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer"
+                                >
+                                  <RotateCcw className="w-3.5 h-3.5" />
+                                  <span>Aktifkan Kembali</span>
+                                </button>
+                              )
+                            ) : (
+                              (onDeleteUser || onArchiveUser) && (
+                                <button
+                                  type="button"
+                                  onClick={() => openDeleteModal(u)}
+                                  disabled={Boolean(isProtectedAccount)}
+                                  aria-label={`Hapus akun ${u.full_name}`}
+                                  title={
+                                    isProtectedAccount
+                                      ? 'Akun administrator / Super Admin dilindungi dan tidak dapat dihapus'
+                                      : (u.activeLoans ?? 0) > 0
+                                        ? 'Pengunjung memiliki pinjaman aktif yang harus diselesaikan'
+                                        : (u.totalLoans ?? 0) > 0
+                                          ? 'Arsipkan / Kelola Penghapusan Akun Pengunjung'
+                                          : 'Hapus Akun Pengunjung'
+                                  }
+                                  className="p-2 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                              )
+                            )}
+                          </div>
                         </td>
                       )}
                     </tr>
@@ -657,6 +811,204 @@ export const AdminUsersView: React.FC<AdminUsersViewProps> = ({
                 )}
               </div>
             </div>
+          </div>
+        </div>
+      )}
+      {/* Modal Tambah / Edit Data Pengunjung */}
+      {formModalMode && (
+        <div
+          className="fixed inset-0 z-50 bg-slate-950/75 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto"
+          onClick={closeFormModal}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="visitor-form-modal-title"
+            className="w-full max-w-md max-h-[90vh] flex flex-col bg-white rounded-2xl border border-slate-200 shadow-2xl overflow-hidden text-left my-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="bg-slate-950 text-white px-6 py-4 flex items-center justify-between border-b border-slate-800">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-blue-500/20 text-amber-300 border border-amber-400/30 flex items-center justify-center shrink-0">
+                  {formModalMode === 'create' ? (
+                    <UserPlus className="w-5 h-5" />
+                  ) : (
+                    <Pencil className="w-5 h-5" />
+                  )}
+                </div>
+                <div>
+                  <h3
+                    id="visitor-form-modal-title"
+                    className="text-base font-bold text-white font-brand"
+                  >
+                    {formModalMode === 'create'
+                      ? 'Tambah Akun Pengunjung Baru'
+                      : 'Edit Data Pengunjung'}
+                  </h3>
+                  <p className="text-[11px] text-slate-400">
+                    {formModalMode === 'create'
+                      ? 'Akun langsung aktif di Supabase Auth & tabel profiles'
+                      : 'Perbarui nama lengkap dan username anggota'}
+                  </p>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={closeFormModal}
+                disabled={isFormSubmitting}
+                aria-label="Tutup modal formulir pengunjung"
+                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 disabled:opacity-40 cursor-pointer transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSubmitVisitorForm} className="p-6 space-y-4 overflow-y-auto text-xs">
+              {formError && (
+                <div
+                  role="alert"
+                  className="rounded-xl bg-rose-50 border border-rose-200 px-3.5 py-2.5 text-xs text-rose-900 font-medium flex items-start gap-2"
+                >
+                  <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                  <span>{formError}</span>
+                </div>
+              )}
+
+              <div>
+                <label
+                  htmlFor="visitor-form-fullname"
+                  className="block font-semibold text-slate-700 mb-1"
+                >
+                  Nama Lengkap *
+                </label>
+                <input
+                  id="visitor-form-fullname"
+                  type="text"
+                  required
+                  minLength={3}
+                  value={formFullName}
+                  onChange={(e) => setFormFullName(e.target.value)}
+                  placeholder="Contoh: Siti Rahmawati"
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-900/25"
+                />
+              </div>
+
+              <div>
+                <label
+                  htmlFor="visitor-form-username"
+                  className="block font-semibold text-slate-700 mb-1"
+                >
+                  Username Anggota *
+                </label>
+                <input
+                  id="visitor-form-username"
+                  type="text"
+                  required
+                  value={formUsername}
+                  onChange={(e) => setFormUsername(e.target.value)}
+                  placeholder="Contoh: sitirahma_01"
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-slate-900 font-mono focus:outline-none focus:ring-2 focus:ring-blue-900/25"
+                />
+                <p className="text-[11px] text-slate-400 mt-1">
+                  3-20 karakter: huruf, angka, atau garis bawah (_).
+                </p>
+              </div>
+
+              {formModalMode === 'create' ? (
+                <>
+                  <div>
+                    <label
+                      htmlFor="visitor-form-email"
+                      className="block font-semibold text-slate-700 mb-1"
+                    >
+                      Alamat Email *
+                    </label>
+                    <input
+                      id="visitor-form-email"
+                      type="email"
+                      required
+                      value={formEmail}
+                      onChange={(e) => setFormEmail(e.target.value)}
+                      placeholder="contoh: anggota@email.com"
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-900/25"
+                    />
+                  </div>
+
+                  <div>
+                    <label
+                      htmlFor="visitor-form-password"
+                      className="block font-semibold text-slate-700 mb-1"
+                    >
+                      Kata Sandi Awal *
+                    </label>
+                    <div className="relative">
+                      <input
+                        id="visitor-form-password"
+                        type={showFormPassword ? 'text' : 'password'}
+                        required
+                        minLength={6}
+                        value={formPassword}
+                        onChange={(e) => setFormPassword(e.target.value)}
+                        placeholder="Minimal 6 karakter"
+                        className="w-full pl-3.5 pr-10 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-900/25"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowFormPassword((prev) => !prev)}
+                        aria-label={showFormPassword ? 'Sembunyikan kata sandi' : 'Lihat kata sandi'}
+                        className="absolute inset-y-0 right-0 px-3 text-slate-400 hover:text-slate-700 cursor-pointer"
+                      >
+                        {showFormPassword ? (
+                          <EyeOff className="w-4 h-4" />
+                        ) : (
+                          <Eye className="w-4 h-4" />
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <div className="rounded-xl bg-slate-50 border border-slate-200 px-3.5 py-2.5 flex items-center gap-2 text-slate-600">
+                  <Mail className="w-4 h-4 text-blue-900 shrink-0" />
+                  <div className="min-w-0">
+                    <span className="block text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                      Email Akun (Auth)
+                    </span>
+                    <span className="font-medium text-slate-800 truncate block">
+                      {editingUser?.email || 'Tersimpan di Supabase Auth'}
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-2.5 pt-2 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={closeFormModal}
+                  disabled={isFormSubmitting}
+                  className="w-full sm:w-auto px-4 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-xs disabled:opacity-50 transition-colors cursor-pointer"
+                >
+                  Batal
+                </button>
+                <button
+                  type="submit"
+                  disabled={isFormSubmitting}
+                  className="w-full sm:w-auto px-5 py-2.5 rounded-xl bg-blue-900 hover:bg-blue-950 text-amber-300 font-bold text-xs shadow-sm disabled:opacity-60 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  {isFormSubmitting ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>Menyimpan...</span>
+                    </>
+                  ) : (
+                    <span>
+                      {formModalMode === 'create' ? 'Simpan Pengunjung' : 'Simpan Perubahan'}
+                    </span>
+                  )}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

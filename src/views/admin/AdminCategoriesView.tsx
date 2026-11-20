@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Category } from '../../types';
-import { Layers, Plus, Edit2, Trash2, X, BookOpen, Check, AlertTriangle } from 'lucide-react';
+import { Layers, Plus, Edit2, Trash2, X, AlertTriangle } from 'lucide-react';
 
 interface AdminCategoriesViewProps {
   categories: Category[];
@@ -92,6 +92,7 @@ export const AdminCategoriesView: React.FC<AdminCategoriesViewProps> = ({
         </div>
 
         <button
+          type="button"
           onClick={openCreateModal}
           className="inline-flex items-center gap-2 py-2.5 px-4 rounded-xl bg-blue-900 hover:bg-blue-950 text-amber-300 font-bold text-xs shadow-md transition-all cursor-pointer self-start sm:self-auto"
         >
@@ -153,19 +154,23 @@ export const AdminCategoriesView: React.FC<AdminCategoriesViewProps> = ({
                     </td>
                     <td className="py-3 px-4 text-right space-x-1 whitespace-nowrap">
                       <button
+                        type="button"
                         onClick={() => openEditModal(cat)}
-                        className="p-1.5 rounded-lg text-slate-600 hover:text-blue-900 hover:bg-slate-100 transition-colors"
+                        className="p-1.5 rounded-lg text-slate-600 hover:text-blue-900 hover:bg-slate-100 transition-colors cursor-pointer"
                         title="Ubah Kategori"
+                        aria-label={`Ubah kategori ${cat.name}`}
                       >
                         <Edit2 className="w-3.5 h-3.5" />
                       </button>
                       <button
+                        type="button"
                         onClick={() => {
                           setDeleteError(null);
                           setDeletingCategory(cat);
                         }}
-                        className="p-1.5 rounded-lg text-slate-600 hover:text-rose-600 hover:bg-rose-50 transition-colors"
+                        className="p-1.5 rounded-lg text-slate-600 hover:text-rose-600 hover:bg-rose-50 transition-colors cursor-pointer"
                         title="Hapus Kategori"
+                        aria-label={`Hapus kategori ${cat.name}`}
                       >
                         <Trash2 className="w-3.5 h-3.5" />
                       </button>
@@ -187,8 +192,10 @@ export const AdminCategoriesView: React.FC<AdminCategoriesViewProps> = ({
                 {editingCategory ? 'Ubah Kategori Buku' : 'Tambah Kategori Baru'}
               </h3>
               <button
+                type="button"
                 onClick={() => setIsModalOpen(false)}
-                className="p-1 text-slate-400 hover:text-white"
+                aria-label="Tutup modal kategori"
+                className="p-1 text-slate-400 hover:text-white cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -282,18 +289,20 @@ export const AdminCategoriesView: React.FC<AdminCategoriesViewProps> = ({
             )}
             <div className="flex gap-2 justify-center pt-2">
               <button
+                type="button"
                 onClick={() => {
                   setDeleteError(null);
                   setDeletingCategory(null);
                 }}
-                className="px-4 py-2 rounded-xl bg-slate-100 text-slate-700 font-semibold text-xs"
+                className="px-4 py-2 rounded-xl bg-slate-100 text-slate-700 font-semibold text-xs cursor-pointer"
               >
                 Batal
               </button>
               <button
+                type="button"
                 onClick={handleDelete}
                 disabled={isSubmitting}
-                className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs"
+                className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs cursor-pointer"
               >
                 {isSubmitting ? 'Menghapus...' : 'Ya, Hapus'}
               </button>

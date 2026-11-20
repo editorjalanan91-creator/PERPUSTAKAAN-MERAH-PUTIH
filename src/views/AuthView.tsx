@@ -290,6 +290,7 @@ export const AuthView: React.FC<AuthViewProps> = ({
                         />
                         <button
                           type="button"
+                          aria-label={showLoginPassword ? 'Sembunyikan kata sandi' : 'Tampilkan kata sandi'}
                           onClick={() => setShowLoginPassword(!showLoginPassword)}
                           className="absolute inset-y-0 right-0 pr-3.5 flex items-center text-slate-400 hover:text-slate-200 cursor-pointer"
                         >
@@ -391,6 +392,7 @@ export const AuthView: React.FC<AuthViewProps> = ({
                           />
                           <button
                             type="button"
+                            aria-label={showRegPassword ? 'Sembunyikan kata sandi' : 'Tampilkan kata sandi'}
                             onClick={() => setShowRegPassword(!showRegPassword)}
                             className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-slate-200 cursor-pointer"
                           >

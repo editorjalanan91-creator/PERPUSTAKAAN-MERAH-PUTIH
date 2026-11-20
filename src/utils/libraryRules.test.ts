@@ -17,6 +17,10 @@ import {
   validateBookDocumentFile,
   evaluateLoanReturnEligibility,
   computeBookStockAfterReturn,
+  computeBookStockAfterApprove,
+  DEFAULT_DAILY_FINE_RP,
+  formatCurrencyIdr,
+  evaluateLoanOverdue,
   formatBookReturnErrorMessage,
 } from './libraryRules';
 import { Book, Loan } from '../types';
@@ -430,3 +434,95 @@ test('formatBookReturnErrorMessage hides PostgREST PGRST116 / RLS technical erro
   );
 });
 
+test('computeBookStockAfterApprove decrements stock once and avoids double-decrement when DB trigger already reduced available_copies', () => {
+  // Tanpa trigger database: before=3, after=3, total=5 => turun tepat -1 ke 2
+  const appDec = computeBookStockAfterApprove({
+    beforeAvailable: 3,
+    afterAvailable: 3,
+    totalCopies: 5,
+  });
+  assert.equal(appDec.targetAvailable, 2);
+  assert.equal(appDec.needsUpdate, true);
+  assert.equal(appDec.decrementedBy, 'application');
+
+  // Dengan trigger database: before=3, after=2, total=5 => tidak update lagi
+  const triggerDec = computeBookStockAfterApprove({
+    beforeAvailable: 3,
+    afterAvailable: 2,
+    totalCopies: 5,
+  });
+  assert.equal(triggerDec.targetAvailable, 2);
+  assert.equal(triggerDec.needsUpdate, false);
+  assert.equal(triggerDec.decrementedBy, 'trigger');
+
+  // Tidak pernah turun di bawah 0
+  const floored = computeBookStockAfterApprove({
+    beforeAvailable: 0,
+    afterAvailable: 0,
+    totalCopies: 5,
+  });
+  assert.equal(floored.targetAvailable, 0);
+  assert.equal(floored.needsUpdate, false);
+  assert.equal(floored.decrementedBy, 'floored_at_zero');
+});
+
+test('evaluateLoanOverdue and formatCurrencyIdr calculate overdue days and fines accurately for active and returned loans', () => {
+  assert.equal(formatCurrencyIdr(3000), 'Rp 3.000');
+  assert.equal(DEFAULT_DAILY_FINE_RP, 1000);
+
+  // Active loan overdue by 4 days
+  const activeOverdue = evaluateLoanOverdue(
+    '2026-11-10T09:00:00Z',
+    null,
+    'approved',
+    '2026-11-14T15:00:00Z',
+    1000
+  );
+  assert.equal(activeOverdue.isOverdue, true);
+  assert.equal(activeOverdue.overdueDays, 4);
+  assert.equal(activeOverdue.estimatedFineRp, 4000);
+  assert.equal(activeOverdue.daysRemaining, -4);
+
+  // Active loan still within deadline (3 days left)
+  const activeOnTime = evaluateLoanOverdue(
+    '2026-11-20T09:00:00Z',
+    null,
+    'approved',
+    '2026-11-17T10:00:00Z'
+  );
+  assert.equal(activeOnTime.isOverdue, false);
+  assert.equal(activeOnTime.overdueDays, 0);
+  assert.equal(activeOnTime.estimatedFineRp, 0);
+  assert.equal(activeOnTime.daysRemaining, 3);
+
+  // Returned 2 days late -> preserves historical overdue metrics
+  const lateReturned = evaluateLoanOverdue(
+    '2026-11-10T09:00:00Z',
+    '2026-11-12T12:00:00Z',
+    'returned',
+    '2026-11-20T00:00:00Z',
+    1500
+  );
+  assert.equal(lateReturned.isOverdue, true);
+  assert.equal(lateReturned.overdueDays, 2);
+  assert.equal(lateReturned.estimatedFineRp, 3000);
+  assert.equal(lateReturned.daysRemaining, null);
+
+  // Pending loan never counts as overdue
+  const pending = evaluateLoanOverdue('2026-11-01T00:00:00Z', null, 'pending', '2026-11-18T00:00:00Z');
+  assert.equal(pending.isOverdue, false);
+  assert.equal(pending.overdueDays, 0);
+});
+
+test('evaluateLoanStatus & evaluateLoanOverdue treat due_at=null loans as active without automatic expiration or fines', () => {
+  assert.equal(evaluateLoanStatus(null, null, 'approved', '2026-12-31'), 'approved');
+  assert.equal(evaluateLoanStatus(undefined, undefined, 'borrowed', '2026-12-31'), 'borrowed');
+
+  const noDueInfo = evaluateLoanOverdue(null, null, 'approved', '2026-12-31');
+  assert.deepEqual(noDueInfo, {
+    isOverdue: false,
+    overdueDays: 0,
+    estimatedFineRp: 0,
+    daysRemaining: null,
+  });
+});

@@ -5,6 +5,8 @@ import {
   aggregateMonthlyReport,
   getLocalYearMonth,
   getAvailableReportMonths,
+  evaluateLoanOverdue,
+  formatCurrencyIdr,
 } from '../../utils/libraryRules';
 import { getBookCoverUrl } from '../../services/supabaseClient';
 import {
@@ -54,6 +56,19 @@ export const AdminReportsView: React.FC<AdminReportsViewProps> = ({ loans }) => 
     return loans.filter((l) => (l.requested_at || l.created_at || '').startsWith(selectedPeriod));
   }, [loans, selectedPeriod]);
 
+  const overdueSummary = useMemo(() => {
+    let overdueCount = 0;
+    let totalEstimatedFineRp = 0;
+    for (const loan of monthLoans) {
+      const info = evaluateLoanOverdue(loan.due_at, loan.returned_at, loan.status);
+      if (info.isOverdue) {
+        overdueCount += 1;
+        totalEstimatedFineRp += info.estimatedFineRp;
+      }
+    }
+    return { overdueCount, totalEstimatedFineRp };
+  }, [monthLoans]);
+
   const handlePrint = () => {
     window.print();
   };
@@ -88,6 +103,7 @@ export const AdminReportsView: React.FC<AdminReportsViewProps> = ({ loans }) => 
           </div>
 
           <button
+            type="button"
             onClick={handlePrint}
             className="flex items-center gap-2 py-2 px-3.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-semibold text-xs shadow-sm transition-all cursor-pointer"
           >
@@ -167,7 +183,7 @@ export const AdminReportsView: React.FC<AdminReportsViewProps> = ({ loans }) => 
             <HelpCircle className="w-4 h-4 text-amber-600" />
           </div>
           <div className="mt-3">
-            <span className="text-3xl font-extrabold text-amber-700">
+            <span className="text-3xl font-extrabold text-amber-700 tabular-nums">
               {report.pendingLoans}
             </span>
             <span className="text-xs text-slate-500 ml-1.5">Permintaan</span>
@@ -177,6 +193,39 @@ export const AdminReportsView: React.FC<AdminReportsViewProps> = ({ loans }) => 
           </p>
         </div>
       </div>
+
+      {/* Historical Overdue & Fine Summary Strip (Legacy rows with due_at only) */}
+      {overdueSummary.overdueCount > 0 && (
+        <div className="bg-white p-4 sm:p-5 rounded-2xl border border-slate-200 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-rose-50 text-rose-700 flex items-center justify-center shrink-0">
+              <AlertTriangle className="w-5 h-5" />
+            </div>
+            <div>
+              <p className="text-xs font-bold text-slate-900">
+                Rekap Historis Keterlambatan (Data Lama — {report.periodLabel})
+              </p>
+              <p className="text-[11px] text-slate-500">
+                Catatan transaksi terdahulu yang memiliki tanggal batas pengembalian historis (due_at).
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-6 text-right">
+            <div>
+              <p className="text-[11px] text-slate-500 font-medium">Transaksi Terlambat</p>
+              <p className="text-base font-extrabold text-rose-700 tabular-nums">
+                {overdueSummary.overdueCount} transaksi
+              </p>
+            </div>
+            <div className="pl-5 border-l border-slate-200">
+              <p className="text-[11px] text-slate-500 font-medium">Total Estimasi Denda</p>
+              <p className="text-base font-extrabold text-slate-900 tabular-nums">
+                {formatCurrencyIdr(overdueSummary.totalEstimatedFineRp)}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Grid: Top Books Ranking & Category Distribution */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
@@ -194,7 +243,7 @@ export const AdminReportsView: React.FC<AdminReportsViewProps> = ({ loans }) => 
               {report.topBooks.map((item, idx) => (
                 <div
                   key={item.bookId}
-                  className="flex items-center justify-between p-3 rounded-xl bg-slate-50 border border-slate-150"
+                  className="flex items-center justify-between p-3 rounded-xl bg-slate-50 border border-slate-200"
                 >
                   <div className="flex items-center gap-3 min-w-0">
                     <span className="w-6 h-6 rounded-full bg-amber-400 text-slate-950 font-black text-xs flex items-center justify-center shrink-0">
@@ -281,13 +330,20 @@ export const AdminReportsView: React.FC<AdminReportsViewProps> = ({ loans }) => 
                   <th className="py-2.5 px-4 font-semibold">Peminjam</th>
                   <th className="py-2.5 px-4 font-semibold">Buku</th>
                   <th className="py-2.5 px-4 font-semibold">Tgl Pengajuan</th>
-                  <th className="py-2.5 px-4 font-semibold">Batas Kembali</th>
+                  <th className="py-2.5 px-4 font-semibold">Tgl Disetujui</th>
                   <th className="py-2.5 px-4 font-semibold">Tgl Dikembalikan</th>
+                  <th className="py-2.5 px-4 font-semibold">Keterlambatan / Denda</th>
                   <th className="py-2.5 px-4 font-semibold text-center">Status</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {monthLoans.map((loan) => (
+                {monthLoans.map((loan) => {
+                  const overdueInfo = evaluateLoanOverdue(
+                    loan.due_at,
+                    loan.returned_at,
+                    loan.status
+                  );
+                  return (
                   <tr key={loan.id} className="hover:bg-slate-50/80 transition-colors">
                     <td className="py-3 px-4 font-mono text-[11px] text-slate-500 font-medium">
                       {loan.id.slice(-6).toUpperCase()}
@@ -302,10 +358,21 @@ export const AdminReportsView: React.FC<AdminReportsViewProps> = ({ loans }) => 
                       {formatDateIndo(loan.requested_at || loan.created_at)}
                     </td>
                     <td className="py-3 px-4 text-slate-600">
-                      {loan.due_at ? formatDateIndo(loan.due_at) : '-'}
+                      {loan.approved_at ? formatDateIndo(loan.approved_at) : '-'}
                     </td>
                     <td className="py-3 px-4 text-slate-600">
                       {loan.returned_at ? formatDateIndo(loan.returned_at) : '-'}
+                    </td>
+                    <td className="py-3 px-4 tabular-nums">
+                      {!loan.due_at ? (
+                        <span className="text-slate-400">-</span>
+                      ) : overdueInfo.isOverdue ? (
+                        <span className="text-rose-700 font-semibold">
+                          {overdueInfo.overdueDays} hari ({formatCurrencyIdr(overdueInfo.estimatedFineRp)})
+                        </span>
+                      ) : (
+                        <span className="text-slate-400">Tepat waktu</span>
+                      )}
                     </td>
                     <td className="py-3 px-4 text-center">
                       {loan.status === 'returned' ? (
@@ -331,7 +398,8 @@ export const AdminReportsView: React.FC<AdminReportsViewProps> = ({ loans }) => 
                       )}
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>

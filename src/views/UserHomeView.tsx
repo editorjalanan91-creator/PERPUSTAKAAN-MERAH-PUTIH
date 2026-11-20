@@ -94,7 +94,7 @@ export const UserHomeView: React.FC<UserHomeViewProps> = ({
           </form>
 
           {/* Quick Counter Badges */}
-          <div className="grid grid-cols-3 gap-3 pt-6 border-t border-slate-800/80 max-w-lg">
+          <div className="grid grid-cols-3 gap-3 pt-6 border-t border-slate-800/80 max-w-lg tabular-nums">
             <div className="p-3 rounded-2xl bg-slate-900/60 border border-slate-800/80">
               <p className="text-xl sm:text-2xl font-black text-amber-400">{totalBooks}</p>
               <p className="text-[11px] text-slate-400 font-medium">Judul Buku</p>
@@ -122,6 +122,7 @@ export const UserHomeView: React.FC<UserHomeViewProps> = ({
             <p className="text-xs text-slate-500">Pilih kategori untuk melihat koleksi terkait</p>
           </div>
           <button
+            type="button"
             onClick={() => onNavigateToCatalog()}
             className="text-xs font-bold text-blue-900 hover:text-blue-700 flex items-center gap-1 cursor-pointer"
           >
@@ -135,6 +136,7 @@ export const UserHomeView: React.FC<UserHomeViewProps> = ({
             const count = books.filter((b) => b.category_id === cat.id).length;
             return (
               <button
+                type="button"
                 key={cat.id}
                 onClick={() => onNavigateToCatalog(cat.name)}
                 className="p-4 rounded-2xl bg-white border border-slate-200/90 hover:border-amber-400 hover:shadow-md transition-all text-left group cursor-pointer"
@@ -145,7 +147,7 @@ export const UserHomeView: React.FC<UserHomeViewProps> = ({
                 <h3 className="text-xs font-bold text-slate-800 group-hover:text-blue-950 truncate">
                   {cat.name}
                 </h3>
-                <p className="text-[10px] text-slate-400 mt-0.5">
+                <p className="text-[10px] text-slate-400 mt-0.5 tabular-nums">
                   {count} koleksi buku
                 </p>
               </button>
@@ -165,6 +167,7 @@ export const UserHomeView: React.FC<UserHomeViewProps> = ({
             <p className="text-xs text-slate-500">Buku-buku mutakhir yang baru saja ditambahkan</p>
           </div>
           <button
+            type="button"
             onClick={() => onNavigateToCatalog()}
             className="text-xs font-bold text-blue-900 hover:text-blue-700 flex items-center gap-1 cursor-pointer"
           >
@@ -246,7 +249,7 @@ export const UserHomeView: React.FC<UserHomeViewProps> = ({
           <div>
             <h4 className="font-bold text-sm text-slate-100">Persetujuan Admin Cepat</h4>
             <p className="text-xs text-slate-400 mt-1 leading-relaxed">
-              Admin memverifikasi dan menyetujui peminjaman secara transparan dengan batas pengembalian terukur.
+              Admin memverifikasi dan menyetujui peminjaman secara transparan dengan catatan riwayat transaksi yang rapi.
             </p>
           </div>
         </div>

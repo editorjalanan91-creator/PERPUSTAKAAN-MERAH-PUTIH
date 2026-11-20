@@ -13,7 +13,7 @@ async function startServer() {
   // Mount Vite or static serving
   if (process.env.NODE_ENV === 'production' && fs.existsSync(path.resolve('dist'))) {
     app.use(express.static(path.resolve('dist')));
-    app.use('*', (req: Request, res: Response) => {
+    app.use('*', (_req: Request, res: Response) => {
       res.sendFile(path.resolve('dist/index.html'));
     });
   } else {

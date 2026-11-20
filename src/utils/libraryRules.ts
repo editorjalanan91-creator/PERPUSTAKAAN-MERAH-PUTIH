@@ -578,6 +578,152 @@ export function computeBookStockAfterReturn(input: {
   };
 }
 
+export function computeBookStockAfterApprove(input: {
+  beforeAvailable: number;
+  afterAvailable: number;
+  totalCopies: number;
+}): {
+  targetAvailable: number;
+  safeBefore: number;
+  safeAfter: number;
+  safeTotal: number;
+  needsUpdate: boolean;
+  decrementedBy: 'trigger' | 'application' | 'floored_at_zero';
+} {
+  const safeTotal = Math.max(0, Math.floor(Number(input.totalCopies) || 0));
+  const safeBefore = Math.max(0, Math.floor(Number(input.beforeAvailable) || 0));
+  const safeAfter = Math.max(0, Math.floor(Number(input.afterAvailable) || 0));
+
+  // Jika trigger database sudah menurunkan available_copies saat status menjadi 'approved',
+  // jangan kurangi stok lagi dari aplikasi agar tidak terjadi pengurangan ganda.
+  if (safeAfter < safeBefore) {
+    const clampedTarget = safeTotal > 0 ? Math.min(safeTotal, Math.max(0, safeAfter)) : Math.max(0, safeAfter);
+    return {
+      targetAvailable: clampedTarget,
+      safeBefore,
+      safeAfter,
+      safeTotal,
+      needsUpdate: clampedTarget !== safeAfter,
+      decrementedBy: 'trigger',
+    };
+  }
+
+  // Jika trigger database tidak mengubah stok, turunkan tepat -1 (minimal 0).
+  const decremented = Math.max(0, safeBefore - 1);
+  const targetAvailable = safeTotal > 0 ? Math.min(safeTotal, decremented) : decremented;
+  const needsUpdate = targetAvailable !== safeAfter;
+
+  return {
+    targetAvailable,
+    safeBefore,
+    safeAfter,
+    safeTotal,
+    needsUpdate,
+    decrementedBy: needsUpdate ? 'application' : 'floored_at_zero',
+  };
+}
+
+export const DEFAULT_DAILY_FINE_RP = 1000;
+
+export function formatCurrencyIdr(amount: number): string {
+  const safeAmount = Math.max(0, Math.round(Number(amount) || 0));
+  return `Rp ${new Intl.NumberFormat('id-ID').format(safeAmount)}`;
+}
+
+export function evaluateLoanOverdue(
+  dueAtStr?: string | null,
+  returnedAtStr?: string | null,
+  status: LoanStatus | string = 'pending',
+  referenceDateStr?: string,
+  dailyFineRp: number = DEFAULT_DAILY_FINE_RP
+): {
+  isOverdue: boolean;
+  overdueDays: number;
+  estimatedFineRp: number;
+  daysRemaining: number | null;
+} {
+  if (!dueAtStr || status === 'pending' || status === 'rejected') {
+    return {
+      isOverdue: false,
+      overdueDays: 0,
+      estimatedFineRp: 0,
+      daysRemaining: null,
+    };
+  }
+
+  const due = new Date(dueAtStr);
+  if (Number.isNaN(due.getTime())) {
+    return {
+      isOverdue: false,
+      overdueDays: 0,
+      estimatedFineRp: 0,
+      daysRemaining: null,
+    };
+  }
+  due.setHours(0, 0, 0, 0);
+
+  const safeDailyFine = Math.max(0, Math.floor(Number(dailyFineRp) || 0));
+  const DAY_MS = 1000 * 60 * 60 * 24;
+
+  if (status === 'returned' || returnedAtStr) {
+    if (!returnedAtStr) {
+      return {
+        isOverdue: false,
+        overdueDays: 0,
+        estimatedFineRp: 0,
+        daysRemaining: null,
+      };
+    }
+    const returned = new Date(returnedAtStr);
+    if (Number.isNaN(returned.getTime())) {
+      return {
+        isOverdue: false,
+        overdueDays: 0,
+        estimatedFineRp: 0,
+        daysRemaining: null,
+      };
+    }
+    returned.setHours(0, 0, 0, 0);
+    const diffDays = Math.round((returned.getTime() - due.getTime()) / DAY_MS);
+    const overdueDays = Math.max(0, diffDays);
+    return {
+      isOverdue: overdueDays > 0,
+      overdueDays,
+      estimatedFineRp: overdueDays * safeDailyFine,
+      daysRemaining: null,
+    };
+  }
+
+  const refDate = referenceDateStr ? new Date(referenceDateStr) : new Date();
+  if (Number.isNaN(refDate.getTime())) {
+    return {
+      isOverdue: false,
+      overdueDays: 0,
+      estimatedFineRp: 0,
+      daysRemaining: null,
+    };
+  }
+  refDate.setHours(0, 0, 0, 0);
+
+  const diffDays = Math.round((due.getTime() - refDate.getTime()) / DAY_MS);
+  if (diffDays < 0) {
+    const overdueDays = Math.abs(diffDays);
+    return {
+      isOverdue: true,
+      overdueDays,
+      estimatedFineRp: overdueDays * safeDailyFine,
+      daysRemaining: diffDays,
+    };
+  }
+
+  return {
+    isOverdue: false,
+    overdueDays: 0,
+    estimatedFineRp: 0,
+    daysRemaining: diffDays,
+  };
+}
+
 export function formatBookReturnErrorMessage(err: any): string {
   const code = String(err?.code || '').trim();
   const rawMessage = String(err?.message || '').trim();

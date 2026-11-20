@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { BookOpen, Compass, BookMarked, User as UserIcon, LogOut, Menu, X, Shield } from 'lucide-react';
+import { BookOpen, Compass, BookMarked, User as UserIcon, LogOut, Menu, X } from 'lucide-react';
 
 interface UserNavbarProps {
   activeTab: 'home' | 'catalog' | 'loans' | 'profile';
@@ -38,6 +38,7 @@ export const UserNavbar: React.FC<UserNavbarProps> = ({
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-18 flex items-center justify-between">
         {/* Brand */}
         <button
+          type="button"
           onClick={() => handleNavClick('home')}
           className="flex items-center gap-3 group text-left cursor-pointer"
         >
@@ -65,6 +66,7 @@ export const UserNavbar: React.FC<UserNavbarProps> = ({
             const isActive = activeTab === item.id;
             return (
               <button
+                type="button"
                 key={item.id}
                 onClick={() => handleNavClick(item.id)}
                 className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all duration-200 relative cursor-pointer ${
@@ -104,6 +106,7 @@ export const UserNavbar: React.FC<UserNavbarProps> = ({
           </div>
 
           <button
+            type="button"
             onClick={() => logout()}
             className="p-2.5 rounded-xl bg-slate-800 hover:bg-rose-950/60 text-slate-300 hover:text-rose-300 border border-slate-700 hover:border-rose-800 transition-all cursor-pointer"
             title="Keluar dari Akun"
@@ -116,8 +119,9 @@ export const UserNavbar: React.FC<UserNavbarProps> = ({
         {/* Mobile menu trigger */}
         <div className="flex md:hidden items-center gap-2">
           <button
+            type="button"
             onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-            className="p-2.5 rounded-xl bg-slate-800 text-slate-300 hover:text-white border border-slate-700"
+            className="p-2.5 rounded-xl bg-slate-800 text-slate-300 hover:text-white border border-slate-700 cursor-pointer"
             aria-label="Toggle mobile menu"
           >
             {mobileMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
@@ -144,9 +148,10 @@ export const UserNavbar: React.FC<UserNavbarProps> = ({
               const isActive = activeTab === item.id;
               return (
                 <button
+                  type="button"
                   key={item.id}
                   onClick={() => handleNavClick(item.id)}
-                  className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-sm font-medium transition-colors ${
+                  className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-sm font-medium transition-colors cursor-pointer ${
                     isActive
                       ? 'bg-blue-900/60 text-amber-300 border border-amber-500/30'
                       : 'text-slate-300 hover:bg-slate-900'
@@ -168,8 +173,9 @@ export const UserNavbar: React.FC<UserNavbarProps> = ({
 
           <div className="pt-2 border-t border-slate-800">
             <button
+              type="button"
               onClick={() => logout()}
-              className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium bg-rose-950/40 text-rose-300 border border-rose-800/60 hover:bg-rose-900/40 transition-colors"
+              className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium bg-rose-950/40 text-rose-300 border border-rose-800/60 hover:bg-rose-900/40 transition-colors cursor-pointer"
             >
               <LogOut className="w-4 h-4" />
               <span>Keluar dari Akun</span>

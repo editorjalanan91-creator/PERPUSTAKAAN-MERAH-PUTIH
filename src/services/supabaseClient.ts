@@ -20,7 +20,8 @@ export const supabasePublishableKey = sanitizeEnvValue(rawSupabaseKey);
 export const ADMIN_EMAIL = sanitizeEnvValue(rawAdminEmail) || 'admin@perpustakaan.go.id';
 
 export const PRODUCTION_APP_URL = 'https://perpustakaan-merah-putih.vercel.app';
-export const RESET_PASSWORD_REDIRECT_URL = `${PRODUCTION_APP_URL}/reset-password`;
+const configuredAppUrl = sanitizeEnvValue(import.meta.env.VITE_APP_URL ?? '').replace(/\/+$/, '');
+export const RESET_PASSWORD_REDIRECT_URL = `${configuredAppUrl || PRODUCTION_APP_URL}/reset-password`;
 
 function isServiceRoleKeyAccidentallyExposed(key: string): boolean {
   if (!key) return false;

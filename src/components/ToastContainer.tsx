@@ -42,6 +42,7 @@ export const ToastContainer: React.FC = () => {
             </div>
 
             <button
+              type="button"
               onClick={() => dismissToast(toast.id)}
               className="shrink-0 text-slate-400 hover:text-white transition-colors p-1 -mr-1 -mt-1 rounded-lg"
               aria-label="Tutup notifikasi"

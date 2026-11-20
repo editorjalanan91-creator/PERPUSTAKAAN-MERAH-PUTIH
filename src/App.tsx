@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { libraryService } from './services/libraryService';
 import { Book, Category, Loan, Profile, ActivityLog } from './types';
@@ -25,7 +25,6 @@ import { supabase } from './services/supabaseClient';
 function LibraryApp() {
   const {
     user,
-    profile,
     isLoading,
     isAdmin,
     isPasswordRecovery,
@@ -80,7 +79,6 @@ function LibraryApp() {
   const [loans, setLoans] = useState<Loan[]>([]);
   const [visitors, setVisitors] = useState<Profile[]>([]);
   const [activityLogs, setActivityLogs] = useState<ActivityLog[]>([]);
-  const [isDataLoading, setIsDataLoading] = useState<boolean>(true);
 
   // Visitor Navigation State
   const [visitorTab, setVisitorTab] = useState<'home' | 'catalog' | 'loans' | 'profile'>('home');
@@ -97,21 +95,78 @@ function LibraryApp() {
   const [isBorrowingBook, setIsBorrowingBook] = useState<boolean>(false);
   const [isReturningBook, setIsReturningBook] = useState<boolean>(false);
 
-  // Load all data from Supabase
-  const loadData = useCallback(async (showLoadingSpinner = true) => {
+  // Load all data from Supabase & authenticated backend API
+  const loadData = useCallback(async () => {
     if (!user) return;
-    if (showLoadingSpinner) setIsDataLoading(true);
 
     try {
-      const [booksData, catsData, loansData] = await Promise.all([
-        libraryService.getBooks(),
+      const [booksRes, catsRes, loansRes] = await Promise.allSettled([
+        libraryService.getBooks(isAdmin),
         libraryService.getCategories(),
         libraryService.getLoans(user.id, isAdmin),
       ]);
 
-      setBooks(booksData);
-      setCategories(catsData);
-      setLoans(loansData);
+      const rawBooks = booksRes.status === 'fulfilled' ? booksRes.value : [];
+      const rawCats = catsRes.status === 'fulfilled' ? catsRes.value : [];
+      const rawLoans = loansRes.status === 'fulfilled' ? loansRes.value : [];
+
+      if (booksRes.status === 'rejected') {
+        console.error('Error loading books:', booksRes.reason);
+      }
+      if (catsRes.status === 'rejected') {
+        console.warn('Categories fetch restricted/failed:', catsRes.reason);
+      }
+      if (loansRes.status === 'rejected') {
+        console.error('Error loading loans:', loansRes.reason);
+      }
+
+      const catMap = new Map(rawCats.map((c) => [c.id, c]));
+      const bookCountByCat: Record<string, number> = {};
+      const enrichedBooks = rawBooks.map((b) => {
+        if (!b.is_archived && b.category_id) {
+          bookCountByCat[b.category_id] = (bookCountByCat[b.category_id] || 0) + 1;
+        }
+        const matchedCat = b.category_id ? catMap.get(b.category_id) : undefined;
+        return {
+          ...b,
+          category: b.category || matchedCat,
+          category_name:
+            b.category?.name ||
+            matchedCat?.name ||
+            (b.category_name && b.category_name !== 'Tanpa Kategori' ? b.category_name : 'Tanpa Kategori'),
+        };
+      });
+
+      const enrichedCats = rawCats.map((cat) => ({
+        ...cat,
+        bookCount: cat.bookCount && cat.bookCount > 0 ? cat.bookCount : bookCountByCat[cat.id] || 0,
+      }));
+
+      const bookMap = new Map(enrichedBooks.map((b) => [b.id, b]));
+      const enrichedLoans = rawLoans.map((l) => {
+        const matchedBook = bookMap.get(l.book_id);
+        return {
+          ...l,
+          book: l.book
+            ? {
+                ...matchedBook,
+                ...l.book,
+                category_name: l.book.category_name || matchedBook?.category_name,
+              }
+            : matchedBook,
+        };
+      });
+
+      setBooks(enrichedBooks);
+      setCategories(enrichedCats);
+      setLoans(enrichedLoans);
+
+      if (booksRes.status === 'rejected' || loansRes.status === 'rejected') {
+        const primaryErr =
+          (loansRes.status === 'rejected' && loansRes.reason) ||
+          (booksRes.status === 'rejected' && booksRes.reason);
+        showToast(primaryErr?.message || 'Sebagian data perpustakaan gagal dimuat.', 'error');
+      }
 
       if (isAdmin) {
         const [visitorsData, logsData] = await Promise.all([
@@ -124,8 +179,6 @@ function LibraryApp() {
     } catch (err: any) {
       console.error('Error loading Supabase library data:', err);
       showToast(err?.message || 'Gagal memuat data dari Supabase.', 'error');
-    } finally {
-      if (showLoadingSpinner) setIsDataLoading(false);
     }
   }, [user, isAdmin, showToast]);
 
@@ -133,13 +186,13 @@ function LibraryApp() {
   useEffect(() => {
     if (!user || isPasswordRecovery) return;
 
-    loadData(true);
+    loadData();
 
     // Subscribe to Realtime Postgres Changes
     const unsubscribe = libraryService.subscribeToChanges(
-      () => loadData(false),
-      () => loadData(false),
-      () => loadData(false)
+      () => loadData(),
+      () => loadData(),
+      () => loadData()
     );
 
     return () => {
@@ -148,18 +201,18 @@ function LibraryApp() {
   }, [user, isPasswordRecovery, loadData]);
 
   // Handle Book Loan Request (Status: pending)
-  const handleBorrowBook = async (bookId: string, durationDays: number, notes?: string) => {
+  const handleBorrowBook = async (bookId: string, notes?: string) => {
     if (!user || isBorrowingBook) return;
     setIsBorrowingBook(true);
     try {
-      await libraryService.requestLoan(user.id, bookId, durationDays, notes);
+      await libraryService.requestLoan(user.id, bookId, notes);
       showToast(
         'Permintaan peminjaman berhasil dikirim. Menunggu persetujuan admin perpustakaan.',
         'success',
         'Pengajuan Terkirim'
       );
       setSelectedBook(null);
-      await loadData(false);
+      await loadData();
     } catch (err: any) {
       showToast(err?.message || 'Gagal mengajukan peminjaman buku.', 'error', 'Pengajuan Gagal');
     } finally {
@@ -172,13 +225,16 @@ function LibraryApp() {
     if (isReturningBook) return;
     setIsReturningBook(true);
     try {
-      await libraryService.returnLoan(loanId, user?.id);
+      const updatedLoan = await libraryService.returnLoan(loanId, user?.id);
+      setLoans((prev) =>
+        prev.map((item) => (item.id === updatedLoan.id ? { ...item, ...updatedLoan } : item))
+      );
       showToast(
         BOOK_RETURN_NOTIFICATIONS.SUCCESS.message,
         BOOK_RETURN_NOTIFICATIONS.SUCCESS.type,
         BOOK_RETURN_NOTIFICATIONS.SUCCESS.title
       );
-      await loadData(false);
+      await loadData();
     } catch (err: any) {
       console.error('[RETURN_BOOK_ERROR]', {
         loanId,
@@ -230,11 +286,17 @@ function LibraryApp() {
       const isBusinessRuleError =
         err?.code === 'INVALID_LOAN_STATUS' ||
         err?.code === 'FORBIDDEN' ||
-        err?.code === 'LOAN_NOT_FOUND';
+        err?.code === 'LOAN_NOT_FOUND' ||
+        err?.code === 'DUPLICATE_LOAN_TRANSACTION' ||
+        err?.code === 'DUPLICATE_BOOK_RECORD' ||
+        err?.code === 'CONCURRENT_LOAN_MODIFICATION' ||
+        err?.code === 'ZERO_ROWS_UPDATED' ||
+        err?.code === 'DB_PERMISSION_DENIED' ||
+        err?.code === '42501';
 
       if (notification === BOOK_RETURN_NOTIFICATIONS.SUCCESS) {
         showToast(notification.message, notification.type, notification.title);
-        await loadData(false);
+        await loadData();
       } else if (isBusinessRuleError && err?.message) {
         showToast(err.message, 'error', BOOK_RETURN_NOTIFICATIONS.UNCONFIRMED.title);
       } else {
@@ -246,11 +308,11 @@ function LibraryApp() {
   };
 
   // --- Admin Loan Management Handlers ---
-  const handleApproveLoan = async (loanId: string, durationDays = 7, adminNote?: string) => {
+  const handleApproveLoan = async (loanId: string, adminNote?: string) => {
     try {
-      await libraryService.approveLoan(loanId, durationDays, adminNote, user?.id);
+      await libraryService.approveLoan(loanId, adminNote, user?.id);
       showToast('Peminjaman buku telah disetujui. Pengunjung kini dapat membaca buku.', 'success', 'Disetujui');
-      await loadData(false);
+      await loadData();
     } catch (err: any) {
       showToast(err?.message || 'Gagal menyetujui peminjaman.', 'error');
       throw err;
@@ -261,7 +323,7 @@ function LibraryApp() {
     try {
       await libraryService.rejectLoan(loanId, reason || 'Permintaan ditolak oleh admin', user?.id);
       showToast('Permintaan peminjaman telah ditolak.', 'info', 'Ditolak');
-      await loadData(false);
+      await loadData();
     } catch (err: any) {
       showToast(err?.message || 'Gagal menolak peminjaman.', 'error');
       throw err;
@@ -279,7 +341,7 @@ function LibraryApp() {
         user?.id
       );
       showToast('Buku baru berhasil ditambahkan ke inventaris perpustakaan.', 'success', 'Buku Ditambahkan');
-      await loadData(false);
+      await loadData();
     } catch (err: any) {
       showToast(err?.message || 'Gagal menambahkan buku.', 'error');
       throw err;
@@ -290,7 +352,7 @@ function LibraryApp() {
     try {
       await libraryService.updateBook(id, bookData, user?.id);
       showToast('Data buku berhasil diperbarui di database.', 'success', 'Buku Diperbarui');
-      await loadData(false);
+      await loadData();
     } catch (err: any) {
       showToast(err?.message || 'Gagal memperbarui buku.', 'error');
       throw err;
@@ -301,7 +363,7 @@ function LibraryApp() {
     try {
       await libraryService.deleteBook(id, user?.id);
       showToast('Buku telah dihapus dari sistem perpustakaan.', 'success', 'Buku Dihapus');
-      await loadData(false);
+      await loadData();
     } catch (err: any) {
       showToast(err?.message || 'Gagal menghapus buku.', 'error');
       throw err;
@@ -318,7 +380,7 @@ function LibraryApp() {
         'success',
         isArchived ? 'Buku Diarsipkan' : 'Buku Dipulihkan'
       );
-      await loadData(false);
+      await loadData();
     } catch (err: any) {
       showToast(err?.message || 'Gagal mengubah status arsip buku.', 'error');
       throw err;
@@ -330,7 +392,7 @@ function LibraryApp() {
     try {
       await libraryService.addCategory(data.name, data.description, user?.id);
       showToast('Kategori baru berhasil ditambahkan.', 'success', 'Kategori Ditambahkan');
-      await loadData(false);
+      await loadData();
     } catch (err: any) {
       showToast(err?.message || 'Gagal menambahkan kategori.', 'error');
       throw err;
@@ -341,7 +403,7 @@ function LibraryApp() {
     try {
       await libraryService.updateCategory(id, { name: data.name, description: data.description }, user?.id);
       showToast('Kategori berhasil diperbarui.', 'success', 'Kategori Diperbarui');
-      await loadData(false);
+      await loadData();
     } catch (err: any) {
       showToast(err?.message || 'Gagal memperbarui kategori.', 'error');
       throw err;
@@ -352,7 +414,7 @@ function LibraryApp() {
     try {
       await libraryService.deleteCategory(id, user?.id);
       showToast('Kategori berhasil dihapus.', 'success', 'Kategori Dihapus');
-      await loadData(false);
+      await loadData();
     } catch (err: any) {
       showToast(err?.message || 'Gagal menghapus kategori.', 'error');
       throw err;
@@ -368,7 +430,7 @@ function LibraryApp() {
         'success',
         'Akun Pengunjung Dihapus'
       );
-      await loadData(false);
+      await loadData();
     } catch (err: any) {
       showToast(err?.message || 'Gagal menghapus akun pengunjung.', 'error');
       throw err;
@@ -394,9 +456,51 @@ function LibraryApp() {
         'success',
         'Akun Pengunjung Diarsipkan'
       );
-      await loadData(false);
+      await loadData();
     } catch (err: any) {
       showToast(err?.message || 'Gagal mengarsipkan akun pengunjung.', 'error');
+      throw err;
+    }
+  };
+
+  const handleCreateVisitor = async (data: {
+    full_name: string;
+    username: string;
+    email: string;
+    password: string;
+  }) => {
+    try {
+      const result = await libraryService.createVisitor(data);
+      setVisitors((prev) => [result.visitor, ...prev.filter((v) => v.id !== result.visitor.id)]);
+      showToast(
+        result.message || 'Akun pengunjung baru berhasil dibuat.',
+        'success',
+        'Pengunjung Ditambahkan'
+      );
+      await loadData();
+    } catch (err: any) {
+      showToast(err?.message || 'Gagal menambahkan akun pengunjung.', 'error');
+      throw err;
+    }
+  };
+
+  const handleUpdateVisitor = async (
+    id: string,
+    data: { full_name: string; username: string }
+  ) => {
+    try {
+      const result = await libraryService.updateVisitor(id, data);
+      setVisitors((prev) =>
+        prev.map((v) => (v.id === id ? { ...v, ...result.visitor } : v))
+      );
+      showToast(
+        result.message || 'Data pengunjung berhasil diperbarui.',
+        'success',
+        'Data Pengunjung Diperbarui'
+      );
+      await loadData();
+    } catch (err: any) {
+      showToast(err?.message || 'Gagal memperbarui data pengunjung.', 'error');
       throw err;
     }
   };
@@ -420,7 +524,7 @@ function LibraryApp() {
         'success',
         'Akun Pengunjung Diaktifkan'
       );
-      await loadData(false);
+      await loadData();
     } catch (err: any) {
       showToast(err?.message || 'Gagal mengaktifkan kembali akun pengunjung.', 'error');
       throw err;
@@ -532,6 +636,8 @@ function LibraryApp() {
                 ).length,
               }))}
               currentUserId={user.id}
+              onCreateUser={handleCreateVisitor}
+              onUpdateUser={handleUpdateVisitor}
               onDeleteUser={handleDeleteVisitor}
               onArchiveUser={handleArchiveVisitor}
               onRestoreUser={handleRestoreVisitor}
@@ -562,6 +668,8 @@ function LibraryApp() {
       )
     : undefined;
 
+  const visitorBooks = books.filter((b) => b.is_published !== false && !b.is_archived);
+
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col">
       {/* If Admin is previewing visitor mode, show helper bar */}
@@ -569,6 +677,7 @@ function LibraryApp() {
         <div className="bg-amber-500 text-slate-950 px-4 py-2 text-xs font-bold flex items-center justify-between sticky top-0 z-50">
           <span>👀 Anda sedang melihat tampilan sebagai Pengunjung Perpustakaan (Katalog Live).</span>
           <button
+            type="button"
             onClick={() => setIsAdminPreviewingVisitor(false)}
             className="px-3 py-1 rounded-lg bg-slate-950 text-amber-300 text-xs hover:bg-slate-900 transition-colors cursor-pointer"
           >
@@ -588,7 +697,7 @@ function LibraryApp() {
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {visitorTab === 'home' && (
           <UserHomeView
-            books={books}
+            books={visitorBooks}
             categories={categories}
             onSelectBook={(book) => setSelectedBook(book)}
             onQuickBorrow={(book) => setSelectedBook(book)}
@@ -602,7 +711,7 @@ function LibraryApp() {
 
         {visitorTab === 'catalog' && (
           <UserCatalogView
-            books={books}
+            books={visitorBooks}
             categories={categories}
             initialCategory={catalogInitialCategory}
             initialQuery={catalogInitialQuery}

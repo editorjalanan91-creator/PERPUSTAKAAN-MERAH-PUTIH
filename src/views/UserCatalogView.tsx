@@ -12,7 +12,6 @@ import {
   CheckCircle2,
   AlertCircle,
   FileText,
-  Calendar,
 } from 'lucide-react';
 
 interface UserCatalogViewProps {
@@ -141,8 +140,10 @@ export const UserCatalogView: React.FC<UserCatalogViewProps> = ({
           />
           {searchQuery && (
             <button
+              type="button"
               onClick={() => setSearchQuery('')}
-              className="absolute inset-y-0 right-0 pr-3 flex items-center text-xs text-slate-400 hover:text-slate-600"
+              aria-label="Hapus pencarian"
+              className="absolute inset-y-0 right-0 pr-3 flex items-center text-xs text-slate-500 hover:text-slate-700 cursor-pointer"
             >
               Hapus
             </button>
@@ -262,11 +263,14 @@ export const UserCatalogView: React.FC<UserCatalogViewProps> = ({
                         </span>
                         <span className="text-xs text-slate-400">Tahun {pubYear}</span>
                       </div>
-                      <h3
-                        onClick={() => onSelectBook(book)}
-                        className="font-bold text-slate-900 text-base hover:text-blue-900 cursor-pointer transition-colors"
-                      >
-                        {book.title}
+                      <h3 className="font-bold text-slate-900 text-base">
+                        <button
+                          type="button"
+                          onClick={() => onSelectBook(book)}
+                          className="text-left hover:text-blue-900 cursor-pointer transition-colors"
+                        >
+                          {book.title}
+                        </button>
                       </h3>
                       <p className="text-xs text-slate-600 mt-0.5">
                         Penulis: <span className="font-semibold text-slate-800">{book.author}</span> {book.publisher ? `• Penerbit: ${book.publisher}` : ''}
@@ -297,12 +301,14 @@ export const UserCatalogView: React.FC<UserCatalogViewProps> = ({
                     </div>
                     <div className="flex items-center gap-2">
                       <button
+                        type="button"
                         onClick={() => onSelectBook(book)}
                         className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-800 transition-colors cursor-pointer"
                       >
                         Lihat Detail
                       </button>
                       <button
+                        type="button"
                         disabled={!isAvailable}
                         onClick={() => onQuickBorrow(book)}
                         className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
@@ -333,6 +339,7 @@ export const UserCatalogView: React.FC<UserCatalogViewProps> = ({
             Tidak ada buku yang sesuai dengan kata kunci atau filter pencarian Anda. Coba periksa ejaan atau ubah pilihan kategori.
           </p>
           <button
+            type="button"
             onClick={resetFilters}
             className="px-5 py-2.5 rounded-xl bg-blue-900 hover:bg-blue-950 text-white font-semibold text-xs transition-colors cursor-pointer"
           >

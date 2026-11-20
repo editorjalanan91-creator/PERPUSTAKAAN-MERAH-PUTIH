@@ -1,7 +1,11 @@
 import React, { useState } from 'react';
 import { Loan } from '../types';
-import { formatDateIndo, formatLoanStatusIndo } from '../utils/libraryRules';
-import { getBookCoverUrl, getBookFileSignedUrl } from '../services/supabaseClient';
+import {
+  formatDateIndo,
+  formatLoanStatusIndo,
+} from '../utils/libraryRules';
+import { getBookCoverUrl } from '../services/supabaseClient';
+import { libraryService } from '../services/libraryService';
 import {
   BookMarked,
   Clock,
@@ -36,14 +40,27 @@ export const UserLoansView: React.FC<UserLoansViewProps> = ({
   const [selectedReceiptLoan, setSelectedReceiptLoan] = useState<Loan | null>(null);
   const [readingLoanId, setReadingLoanId] = useState<string | null>(null);
   const [returningLoanId, setReturningLoanId] = useState<string | null>(null);
+  const [confirmingReturnLoan, setConfirmingReturnLoan] = useState<Loan | null>(null);
+  const [returnModalError, setReturnModalError] = useState<string | null>(null);
   const [readyReaderLink, setReadyReaderLink] = useState<{ loanId: string; url: string } | null>(null);
   const [readerError, setReaderError] = useState<string | null>(null);
 
-  const handleReturnClick = async (loanId: string) => {
+  const handleOpenReturnConfirm = (loan: Loan) => {
     if (isReturning || returningLoanId) return;
+    setReturnModalError(null);
+    setConfirmingReturnLoan(loan);
+  };
+
+  const handleConfirmReturn = async () => {
+    if (!confirmingReturnLoan || isReturning || returningLoanId) return;
+    const loanId = confirmingReturnLoan.id;
     setReturningLoanId(loanId);
+    setReturnModalError(null);
     try {
       await onReturnBook(loanId);
+      setConfirmingReturnLoan(null);
+    } catch (err: any) {
+      setReturnModalError(err?.message || 'Gagal mengonfirmasi pengembalian buku.');
     } finally {
       setReturningLoanId(null);
     }
@@ -69,12 +86,8 @@ export const UserLoansView: React.FC<UserLoansViewProps> = ({
     }
     setReadingLoanId(loan.id);
     try {
-      const signedUrl = await getBookFileSignedUrl(loan.book.file_path, 7200);
-      if (signedUrl) {
-        setReadyReaderLink({ loanId: loan.id, url: signedUrl });
-      } else {
-        setReaderError('Gagal mendapatkan tautan akses berkas digital. Silakan hubungi admin perpustakaan.');
-      }
+      const signedUrl = await libraryService.getBookDigitalReadUrl(loan.book_id, loan.book.file_path);
+      setReadyReaderLink({ loanId: loan.id, url: signedUrl });
     } catch (err: any) {
       setReaderError(err?.message || 'Terjadi kesalahan saat memuat berkas digital.');
     } finally {
@@ -91,13 +104,14 @@ export const UserLoansView: React.FC<UserLoansViewProps> = ({
             Daftar Peminjaman Saya
           </h1>
           <p className="text-xs sm:text-sm text-slate-500 mt-1">
-            Pantau status pengajuan peminjaman, akses baca buku digital yang disetujui, dan batas pengembalian.
+            Pantau status pengajuan peminjaman, akses baca buku digital yang disetujui, dan riwayat pengembalian.
           </p>
         </div>
 
         {/* Filter Buttons */}
         <div className="flex flex-wrap items-center gap-1.5 p-1 bg-slate-100 rounded-xl border border-slate-200 self-start sm:self-auto">
           <button
+            type="button"
             onClick={() => setFilterStatus('all')}
             className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
               filterStatus === 'all' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-900'
@@ -106,6 +120,7 @@ export const UserLoansView: React.FC<UserLoansViewProps> = ({
             Semua ({loans.length})
           </button>
           <button
+            type="button"
             onClick={() => setFilterStatus('pending')}
             className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
               filterStatus === 'pending' ? 'bg-amber-500 text-slate-950 shadow-sm' : 'text-slate-500 hover:text-slate-900'
@@ -114,6 +129,7 @@ export const UserLoansView: React.FC<UserLoansViewProps> = ({
             Menunggu ({pendingCount})
           </button>
           <button
+            type="button"
             onClick={() => setFilterStatus('approved')}
             className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
               filterStatus === 'approved' ? 'bg-blue-900 text-white shadow-sm' : 'text-slate-500 hover:text-slate-900'
@@ -122,6 +138,7 @@ export const UserLoansView: React.FC<UserLoansViewProps> = ({
             Disetujui ({approvedCount})
           </button>
           <button
+            type="button"
             onClick={() => setFilterStatus('returned')}
             className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
               filterStatus === 'returned' ? 'bg-emerald-700 text-white shadow-sm' : 'text-slate-500 hover:text-slate-900'
@@ -161,17 +178,6 @@ export const UserLoansView: React.FC<UserLoansViewProps> = ({
             const coverUrl = getBookCoverUrl(loan.book?.cover_path);
             const bookTitle = loan.book?.title || 'Judul Buku';
             const bookAuthor = loan.book?.author || 'Penulis';
-
-            // Calculate days remaining if due_at is set
-            let diffDays: number | null = null;
-            if (loan.due_at) {
-              const today = new Date();
-              today.setHours(0, 0, 0, 0);
-              const due = new Date(loan.due_at);
-              due.setHours(0, 0, 0, 0);
-              const diffTime = due.getTime() - today.getTime();
-              diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-            }
 
             return (
               <div
@@ -238,10 +244,10 @@ export const UserLoansView: React.FC<UserLoansViewProps> = ({
                         <Calendar className="w-3.5 h-3.5 text-slate-400" />
                         Tgl Pengajuan: <strong className="text-slate-700">{formatDateIndo(loan.requested_at || loan.created_at)}</strong>
                       </span>
-                      {loan.due_at && (
+                      {loan.approved_at && (
                         <span className="flex items-center gap-1">
                           <Clock className="w-3.5 h-3.5 text-slate-400" />
-                          Batas Kembali: <strong className="text-slate-700">{formatDateIndo(loan.due_at)}</strong>
+                          Disetujui: <strong className="text-slate-700">{formatDateIndo(loan.approved_at)}</strong>
                         </span>
                       )}
                       {loan.returned_at && (
@@ -264,9 +270,9 @@ export const UserLoansView: React.FC<UserLoansViewProps> = ({
                 {/* Actions */}
                 <div className="flex sm:flex-row md:flex-col items-center md:items-end justify-between w-full md:w-auto gap-3 pt-4 md:pt-0 border-t md:border-t-0 border-slate-100">
                   <div className="text-left md:text-right">
-                    {isApproved && diffDays !== null && (
+                    {isApproved && (
                       <p className="text-xs font-semibold text-blue-900">
-                        {diffDays >= 0 ? `Sisa ${diffDays} hari lagi` : 'Batas pengembalian terlewat'}
+                        Aktif &amp; Dapat Dibaca
                       </p>
                     )}
                     {isPending && (
@@ -316,11 +322,11 @@ export const UserLoansView: React.FC<UserLoansViewProps> = ({
                       <button
                         type="button"
                         disabled={isReturning || returningLoanId !== null}
-                        onClick={() => handleReturnClick(loan.id)}
+                        onClick={() => handleOpenReturnConfirm(loan)}
                         className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm transition-all cursor-pointer disabled:opacity-50"
                       >
                         <RotateCcw className={`w-3.5 h-3.5 ${returningLoanId === loan.id ? 'animate-spin' : ''}`} />
-                        <span>{returningLoanId === loan.id ? 'Memproses...' : 'Kembalikan'}</span>
+                        <span>{returningLoanId === loan.id ? 'Memproses...' : 'Kembalikan Buku'}</span>
                       </button>
                     )}
                   </div>
@@ -342,6 +348,7 @@ export const UserLoansView: React.FC<UserLoansViewProps> = ({
             Anda belum memiliki pengajuan atau peminjaman buku. Jelajahi katalog perpustakaan dan ajukan peminjaman buku yang Anda minati.
           </p>
           <button
+            type="button"
             onClick={onNavigateToCatalog}
             className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-blue-900 hover:bg-blue-950 text-white font-semibold text-xs transition-colors cursor-pointer"
           >
@@ -362,8 +369,10 @@ export const UserLoansView: React.FC<UserLoansViewProps> = ({
                 <span className="font-bold text-sm">Resi Peminjaman Resmi</span>
               </div>
               <button
+                type="button"
+                aria-label="Tutup resi peminjaman"
                 onClick={() => setSelectedReceiptLoan(null)}
-                className="p-1 rounded-lg text-slate-400 hover:text-white"
+                className="p-1 rounded-lg text-slate-400 hover:text-white cursor-pointer"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -404,10 +413,10 @@ export const UserLoansView: React.FC<UserLoansViewProps> = ({
                     {formatDateIndo(selectedReceiptLoan.requested_at || selectedReceiptLoan.created_at)}
                   </span>
                 </div>
-                {selectedReceiptLoan.due_at && (
+                {selectedReceiptLoan.approved_at && (
                   <div className="flex justify-between">
-                    <span className="text-slate-500">Batas Pengembalian:</span>
-                    <span className="font-bold text-blue-900">{formatDateIndo(selectedReceiptLoan.due_at)}</span>
+                    <span className="text-slate-500">Tanggal Disetujui:</span>
+                    <span className="font-bold text-blue-900">{formatDateIndo(selectedReceiptLoan.approved_at)}</span>
                   </div>
                 )}
                 <div className="flex justify-between">
@@ -427,7 +436,7 @@ export const UserLoansView: React.FC<UserLoansViewProps> = ({
               </div>
 
               <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 text-[11px] text-slate-500 leading-relaxed">
-                ℹ️ Simpan bukti ini sebagai tanda terima peminjaman buku yang sah di Perpustakaan Merah Putih. Harap mengembalikan buku tepat waktu dalam kondisi baik.
+                ℹ️ Simpan bukti ini sebagai tanda terima peminjaman buku yang sah di Perpustakaan Merah Putih. Harap mengembalikan buku dalam kondisi baik setelah selesai dibaca.
               </div>
 
               <div className="flex items-center gap-2 pt-2">
@@ -447,6 +456,94 @@ export const UserLoansView: React.FC<UserLoansViewProps> = ({
                   Tutup
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Konfirmasi Pengembalian Buku */}
+      {confirmingReturnLoan && (
+        <div
+          className="fixed inset-0 z-50 overflow-y-auto bg-slate-950/75 backdrop-blur-sm flex items-center justify-center p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="confirm-return-title"
+        >
+          <div className="w-full max-w-md bg-white rounded-3xl p-6 space-y-4 shadow-2xl border border-slate-200">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div className="flex items-center gap-2">
+                <RotateCcw className="w-5 h-5 text-emerald-600" />
+                <h3 id="confirm-return-title" className="font-bold text-sm text-slate-900 font-brand">
+                  Konfirmasi Pengembalian Buku
+                </h3>
+              </div>
+              <button
+                type="button"
+                aria-label="Tutup dialog pengembalian"
+                disabled={isReturning || returningLoanId !== null}
+                onClick={() => {
+                  setReturnModalError(null);
+                  setConfirmingReturnLoan(null);
+                }}
+                className="p-1 rounded-lg text-slate-400 hover:text-slate-700 cursor-pointer disabled:opacity-50"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {returnModalError && (
+              <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                <span>{returnModalError}</span>
+              </div>
+            )}
+
+            <div className="p-3.5 rounded-2xl bg-slate-50 border border-slate-200 text-xs space-y-1">
+              <p className="font-bold text-slate-900">
+                {confirmingReturnLoan.book?.title || 'Koleksi Buku'}
+              </p>
+              <p className="text-slate-500">
+                Penulis: {confirmingReturnLoan.book?.author || 'Penulis'}
+              </p>
+            </div>
+
+            <p className="text-xs text-slate-600 leading-relaxed">
+              Apakah Anda yakin ingin mengembalikan buku{' '}
+              <strong className="text-slate-900">
+                &ldquo;{confirmingReturnLoan.book?.title || 'ini'}&rdquo;
+              </strong>
+              ? Status peminjaman akan diperbarui menjadi selesai dan stok buku akan ditambahkan kembali secara otomatis.
+            </p>
+
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                type="button"
+                disabled={isReturning || returningLoanId !== null}
+                onClick={() => {
+                  setReturnModalError(null);
+                  setConfirmingReturnLoan(null);
+                }}
+                className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-xs cursor-pointer disabled:opacity-50"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                disabled={isReturning || returningLoanId !== null}
+                onClick={handleConfirmReturn}
+                className="px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs shadow-md cursor-pointer disabled:opacity-50 inline-flex items-center gap-1.5"
+              >
+                <RotateCcw
+                  className={`w-3.5 h-3.5 ${
+                    returningLoanId === confirmingReturnLoan.id ? 'animate-spin' : ''
+                  }`}
+                />
+                <span>
+                  {returningLoanId === confirmingReturnLoan.id
+                    ? 'Memproses...'
+                    : 'Ya, Kembalikan Buku'}
+                </span>
+              </button>
             </div>
           </div>
         </div>

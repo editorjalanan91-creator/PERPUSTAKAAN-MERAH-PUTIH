@@ -1,4 +1,4 @@
-import express, { Request, Response } from 'express';
+import express, { NextFunction, Request, Response } from 'express';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import {
   evaluateVisitorArchiveEligibility,
@@ -8,6 +8,7 @@ import {
   isValidUuid,
 } from '../utils/visitorDeletion';
 import {
+  computeBookStockAfterApprove,
   computeBookStockAfterReturn,
   evaluateLoanReturnEligibility,
   formatBookReturnErrorMessage,
@@ -223,12 +224,133 @@ export function inspectServerSupabaseEnv(
   return {
     url,
     authApiKey,
-    serviceRoleKey,
+    serviceRoleKey: '',
     hasSupabaseUrl: true,
     hasServiceRoleKey: true,
-    isServiceRoleKeyValid: true,
+    isServiceRoleKeyValid: false,
     keyStatus: 'unrecognized_format',
     hasUrlMismatch,
+    error:
+      'Format SUPABASE_SERVICE_ROLE_KEY di server tidak dikenali. Pastikan menggunakan Secret Key (sb_secret_...) atau Service Role JWT yang valid dari Supabase Dashboard.',
+  };
+}
+
+export type PublishableKeyStatus =
+  | 'valid_publishable_or_anon'
+  | 'invalid_secret_key_exposed'
+  | 'invalid_placeholder'
+  | 'missing';
+
+export interface VercelEnvChecklistResult {
+  hasServerSupabaseUrl: boolean;
+  hasViteSupabaseUrl: boolean;
+  supabaseUrlHost: string | null;
+  hasUrlMismatch: boolean;
+  hasVitePublishableKey: boolean;
+  isVitePublishableKeySafe: boolean;
+  vitePublishableKeyStatus: PublishableKeyStatus;
+  hasViteAppUrl: boolean;
+  viteAppUrlValid: boolean;
+  viteAppUrl: string | null;
+  hasViteAdminEmail: boolean;
+  hasServiceRoleKey: boolean;
+  serviceRoleKeyValid: boolean;
+  serviceRoleKeyStatus: ServiceRoleKeyStatus;
+  hasSuperAdminUids: boolean;
+  superAdminUidsCount: number;
+  allRequiredPresentAndValid: boolean;
+}
+
+function isValidHttpUrlStrict(raw: string): boolean {
+  return (
+    /^https?:\/\/[a-z0-9.-]+(:\d+)?(\/.*)?$/i.test(raw) &&
+    !raw.includes('your-project-ref') &&
+    !raw.includes('placeholder') &&
+    !raw.includes('MY_APP_URL')
+  );
+}
+
+/**
+ * Mengaudit kelengkapan seluruh Environment Variables Vercel (frontend & server)
+ * secara aman: HANYA mengembalikan status boolean, hostname, & URL publik —
+ * TIDAK PERNAH mengembalikan nilai secret key atau token.
+ */
+export function inspectVercelEnvChecklist(
+  env: Record<string, string | undefined> = process.env
+): VercelEnvChecklistResult {
+  const serverInspection = inspectServerSupabaseEnv(env);
+  const rawServerUrl = sanitizeEnv(env.SUPABASE_URL).replace(/\/+$/, '');
+  const rawViteUrl = sanitizeEnv(env.VITE_SUPABASE_URL).replace(/\/+$/, '');
+  const rawPubKey = sanitizeEnv(env.VITE_SUPABASE_PUBLISHABLE_KEY || env.VITE_SUPABASE_ANON_KEY);
+  const rawAppUrl = sanitizeEnv(env.VITE_APP_URL).replace(/\/+$/, '');
+  const rawAdminEmail = sanitizeEnv(env.VITE_ADMIN_EMAIL);
+  const superAdminUids = getSuperAdminUids(env);
+
+  const hasServerSupabaseUrl = Boolean(rawServerUrl && isValidHttpUrlStrict(rawServerUrl));
+  const hasViteSupabaseUrl = Boolean(rawViteUrl && isValidHttpUrlStrict(rawViteUrl));
+
+  let supabaseUrlHost: string | null = null;
+  const candidateUrl = rawServerUrl || rawViteUrl;
+  if (candidateUrl && isValidHttpUrlStrict(candidateUrl)) {
+    try {
+      supabaseUrlHost = new URL(candidateUrl).hostname;
+    } catch {
+      supabaseUrlHost = null;
+    }
+  }
+
+  let vitePublishableKeyStatus: PublishableKeyStatus = 'missing';
+  if (rawPubKey) {
+    if (
+      rawPubKey.startsWith('sb_secret_') ||
+      decodeJwtRoleClaim(rawPubKey) === 'service_role'
+    ) {
+      vitePublishableKeyStatus = 'invalid_secret_key_exposed';
+    } else if (
+      rawPubKey.length <= 20 ||
+      rawPubKey.includes('your-anon-or-publishable-key') ||
+      rawPubKey.includes('your-supabase-publishable')
+    ) {
+      vitePublishableKeyStatus = 'invalid_placeholder';
+    } else {
+      vitePublishableKeyStatus = 'valid_publishable_or_anon';
+    }
+  }
+
+  const hasVitePublishableKey = Boolean(rawPubKey);
+  const isVitePublishableKeySafe = vitePublishableKeyStatus === 'valid_publishable_or_anon';
+  const hasViteAppUrl = Boolean(rawAppUrl);
+  const viteAppUrlValid = Boolean(rawAppUrl && isValidHttpUrlStrict(rawAppUrl));
+  const hasViteAdminEmail = Boolean(
+    rawAdminEmail && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(rawAdminEmail)
+  );
+
+  const allRequiredPresentAndValid =
+    hasServerSupabaseUrl &&
+    hasViteSupabaseUrl &&
+    !serverInspection.hasUrlMismatch &&
+    isVitePublishableKeySafe &&
+    viteAppUrlValid &&
+    serverInspection.isServiceRoleKeyValid;
+
+  return {
+    hasServerSupabaseUrl,
+    hasViteSupabaseUrl,
+    supabaseUrlHost,
+    hasUrlMismatch: serverInspection.hasUrlMismatch,
+    hasVitePublishableKey,
+    isVitePublishableKeySafe,
+    vitePublishableKeyStatus,
+    hasViteAppUrl,
+    viteAppUrlValid,
+    viteAppUrl: viteAppUrlValid ? rawAppUrl : null,
+    hasViteAdminEmail,
+    hasServiceRoleKey: serverInspection.hasServiceRoleKey,
+    serviceRoleKeyValid: serverInspection.isServiceRoleKeyValid,
+    serviceRoleKeyStatus: serverInspection.keyStatus,
+    hasSuperAdminUids: superAdminUids.length > 0,
+    superAdminUidsCount: superAdminUids.length,
+    allRequiredPresentAndValid,
   };
 }
 
@@ -412,9 +534,327 @@ export async function probeAdminProfilesAccess(
   };
 }
 
+export interface AdminReturnTablesProbeResult {
+  ok: boolean;
+  statusCode: number;
+  profilesOk: boolean;
+  loansOk: boolean;
+  booksOk: boolean;
+  keyStatus: ServiceRoleKeyStatus;
+  errorCode?: string;
+  errorMessage?: string;
+}
+
+/**
+ * Pengujian server-side non-PII untuk memverifikasi hak akses SELECT Admin Client
+ * pada public.profiles, public.loans, dan public.books (mendeteksi 42501 sebelum return).
+ */
+export async function probeAdminReturnTablesAccess(
+  getAdminClient: () => { client: SupabaseClient | null; error?: string } = () =>
+    defaultCreateSupabaseAdminClient(),
+  envInspection: ServerSupabaseEnvInspection = inspectServerSupabaseEnv()
+): Promise<AdminReturnTablesProbeResult> {
+  const { client: supabaseAdmin, error: adminClientError } = getAdminClient();
+  if (!supabaseAdmin) {
+    return {
+      ok: false,
+      statusCode: 500,
+      profilesOk: false,
+      loansOk: false,
+      booksOk: false,
+      keyStatus: envInspection.keyStatus,
+      errorCode: 'ADMIN_CLIENT_NOT_CONFIGURED',
+      errorMessage: adminClientError || 'Konfigurasi Admin Supabase tidak lengkap.',
+    };
+  }
+
+  const [profilesRes, loansRes, booksRes] = await Promise.all([
+    supabaseAdmin.from('profiles').select('id').limit(0),
+    supabaseAdmin.from('loans').select('id').limit(0),
+    supabaseAdmin.from('books').select('id').limit(0),
+  ]);
+
+  const firstErr = loansRes.error || booksRes.error || profilesRes.error;
+  if (firstErr) {
+    return {
+      ok: false,
+      statusCode: 500,
+      profilesOk: !profilesRes.error,
+      loansOk: !loansRes.error,
+      booksOk: !booksRes.error,
+      keyStatus: envInspection.keyStatus,
+      errorCode: firstErr.code || 'TABLE_ACCESS_ERROR',
+      errorMessage: firstErr.message,
+    };
+  }
+
+  return {
+    ok: true,
+    statusCode: 200,
+    profilesOk: true,
+    loansOk: true,
+    booksOk: true,
+    keyStatus: envInspection.keyStatus,
+  };
+}
+
+export interface AdminStorageAndCatalogProbeResult {
+  ok: boolean;
+  categoriesOk: boolean;
+  categoriesErrorCode?: string;
+  activityLogsOk: boolean;
+  storageOk: boolean;
+  bookCoversBucketExists: boolean;
+  bookCoversPublic: boolean | null;
+  bookFilesBucketExists: boolean;
+  bookFilesPublic: boolean | null;
+  errorMessage?: string;
+}
+
+/**
+ * Pengujian server-side non-PII untuk memverifikasi tabel tambahan (categories, activity_logs)
+ * dan konfigurasi bucket Supabase Storage ('book-covers' publik & 'book-files' privat).
+ */
+export async function probeAdminStorageAndCatalogAccess(
+  getAdminClient: () => { client: SupabaseClient | null; error?: string } = () =>
+    defaultCreateSupabaseAdminClient()
+): Promise<AdminStorageAndCatalogProbeResult> {
+  const { client: supabaseAdmin, error: adminClientError } = getAdminClient();
+  if (!supabaseAdmin) {
+    return {
+      ok: false,
+      categoriesOk: false,
+      activityLogsOk: false,
+      storageOk: false,
+      bookCoversBucketExists: false,
+      bookCoversPublic: null,
+      bookFilesBucketExists: false,
+      bookFilesPublic: null,
+      errorMessage: adminClientError || 'Konfigurasi Admin Supabase tidak lengkap.',
+    };
+  }
+
+  const [catRes, logRes] = await Promise.all([
+    supabaseAdmin.from('categories').select('id').limit(0),
+    supabaseAdmin.from('activity_logs').select('id').limit(0),
+  ]);
+
+  let storageOk = false;
+  let bookCoversBucketExists = false;
+  let bookCoversPublic: boolean | null = null;
+  let bookFilesBucketExists = false;
+  let bookFilesPublic: boolean | null = null;
+  let storageErrorMsg: string | undefined;
+
+  if (typeof (supabaseAdmin as any)?.storage?.listBuckets === 'function') {
+    const { data: buckets, error: bucketsError } = await (supabaseAdmin as any).storage.listBuckets();
+    if (bucketsError) {
+      storageErrorMsg = bucketsError.message;
+    } else if (Array.isArray(buckets)) {
+      storageOk = true;
+      const coversBucket = buckets.find((b: any) => b?.id === 'book-covers' || b?.name === 'book-covers');
+      const filesBucket = buckets.find((b: any) => b?.id === 'book-files' || b?.name === 'book-files');
+      bookCoversBucketExists = Boolean(coversBucket);
+      bookCoversPublic = coversBucket ? Boolean(coversBucket.public) : null;
+      bookFilesBucketExists = Boolean(filesBucket);
+      bookFilesPublic = filesBucket ? Boolean(filesBucket.public) : null;
+    }
+  } else {
+    storageErrorMsg = 'API listBuckets belum tersedia pada Storage client.';
+  }
+
+  const categoriesOk = !catRes.error;
+  const activityLogsOk = !logRes.error;
+  const firstErrMsg = catRes.error?.message || logRes.error?.message || storageErrorMsg;
+
+  return {
+    ok: categoriesOk && activityLogsOk && storageOk,
+    categoriesOk,
+    ...(catRes.error?.code ? { categoriesErrorCode: catRes.error.code } : {}),
+    activityLogsOk,
+    storageOk,
+    bookCoversBucketExists,
+    bookCoversPublic,
+    bookFilesBucketExists,
+    bookFilesPublic,
+    ...(firstErrMsg ? { errorMessage: firstErrMsg } : {}),
+  };
+}
+
+export interface DatabaseMigrationProbeResult {
+  profilesArchiveColumnsOk: boolean;
+  profilesArchiveColumnsError?: string;
+  hasUserLoanRpcOk: boolean | null;
+  hasUserLoanRpcError?: string;
+  isAdminRpcOk: boolean | null;
+  isAdminRpcError?: string;
+  anonLoansDenied: boolean | null;
+  anonLoansErrorCode?: string;
+  anonProfilesDenied: boolean | null;
+  anonProfilesErrorCode?: string;
+  anonActivityLogsDenied: boolean | null;
+  anonActivityLogsErrorCode?: string;
+  anonBooksReadable: boolean | null;
+  anonBooksErrorCode?: string;
+  anonCategoriesReadable: boolean | null;
+  anonCategoriesErrorCode?: string;
+  hasDirectDbUrl: boolean;
+  hasSupabaseAccessToken: boolean;
+}
+
+function defaultCreateSupabaseAnonProbeClient(
+  env: Record<string, string | undefined> = process.env
+): { client: SupabaseClient | null; error?: string } {
+  const inspection = inspectServerSupabaseEnv(env);
+  if (!inspection.hasSupabaseUrl || inspection.hasUrlMismatch) {
+    return { client: null, error: inspection.error };
+  }
+  const anonKey = sanitizeEnv(
+    env.SUPABASE_ANON_KEY || env.VITE_SUPABASE_PUBLISHABLE_KEY || env.VITE_SUPABASE_ANON_KEY
+  );
+  if (
+    !anonKey ||
+    anonKey === inspection.serviceRoleKey ||
+    anonKey.startsWith('sb_secret_') ||
+    decodeJwtRoleClaim(anonKey) === 'service_role'
+  ) {
+    return { client: null, error: 'Publishable/Anon key tidak tersedia untuk probe anon.' };
+  }
+  const client = createClient(inspection.url, anonKey, {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+      detectSessionInUrl: false,
+    },
+  });
+  return { client };
+}
+
+export async function probeDatabaseMigrations(
+  getAdminClient: () => { client: SupabaseClient | null; error?: string } = () =>
+    defaultCreateSupabaseAdminClient(),
+  getAnonProbeClient: () => { client: SupabaseClient | null; error?: string } = () =>
+    defaultCreateSupabaseAnonProbeClient()
+): Promise<DatabaseMigrationProbeResult> {
+  const hasDirectDbUrl = Boolean(
+    process.env.SUPABASE_DB_URL?.trim() ||
+      process.env.DATABASE_URL?.trim() ||
+      process.env.POSTGRES_URL?.trim()
+  );
+  const hasSupabaseAccessToken = Boolean(process.env.SUPABASE_ACCESS_TOKEN?.trim());
+
+  const { client: supabaseAdmin } = getAdminClient();
+  const { client: supabaseAnon } = getAnonProbeClient();
+
+  if (!supabaseAdmin) {
+    return {
+      profilesArchiveColumnsOk: false,
+      profilesArchiveColumnsError: 'ADMIN_CLIENT_NOT_CONFIGURED',
+      hasUserLoanRpcOk: null,
+      isAdminRpcOk: null,
+      anonLoansDenied: null,
+      anonProfilesDenied: null,
+      anonActivityLogsDenied: null,
+      anonBooksReadable: null,
+      anonCategoriesReadable: null,
+      hasDirectDbUrl,
+      hasSupabaseAccessToken,
+    };
+  }
+
+  const colRes = await supabaseAdmin
+    .from('profiles')
+    .select('is_active, archived_at, archived_by, is_super_admin')
+    .limit(0);
+
+  let hasUserLoanRpcOk: boolean | null = null;
+  let hasUserLoanRpcError: string | undefined;
+  let isAdminRpcOk: boolean | null = null;
+  let isAdminRpcError: string | undefined;
+
+  if (typeof (supabaseAdmin as any).rpc === 'function') {
+    try {
+      const [loanRpcRes, adminRpcRes] = await Promise.all([
+        (supabaseAdmin as any).rpc('has_user_loan_for_book', {
+          p_book_id: '00000000-0000-0000-0000-000000000000',
+        }),
+        (supabaseAdmin as any).rpc('is_admin'),
+      ]);
+      hasUserLoanRpcOk = !loanRpcRes?.error;
+      if (loanRpcRes?.error) {
+        hasUserLoanRpcError = loanRpcRes.error.code || loanRpcRes.error.message;
+      }
+      isAdminRpcOk = !adminRpcRes?.error;
+      if (adminRpcRes?.error) {
+        isAdminRpcError = adminRpcRes.error.code || adminRpcRes.error.message;
+      }
+    } catch (rpcErr: any) {
+      hasUserLoanRpcOk = false;
+      hasUserLoanRpcError = rpcErr?.message || 'RPC_PROBE_ERROR';
+    }
+  }
+
+  let anonLoansDenied: boolean | null = null;
+  let anonLoansErrorCode: string | undefined;
+  let anonProfilesDenied: boolean | null = null;
+  let anonProfilesErrorCode: string | undefined;
+  let anonActivityLogsDenied: boolean | null = null;
+  let anonActivityLogsErrorCode: string | undefined;
+  let anonBooksReadable: boolean | null = null;
+  let anonBooksErrorCode: string | undefined;
+  let anonCategoriesReadable: boolean | null = null;
+  let anonCategoriesErrorCode: string | undefined;
+
+  if (supabaseAnon && supabaseAnon !== supabaseAdmin && typeof supabaseAnon.from === 'function') {
+    try {
+      const [anonLoans, anonProfiles, anonLogs, anonBooks, anonCats] = await Promise.all([
+        supabaseAnon.from('loans').select('id').limit(0),
+        supabaseAnon.from('profiles').select('id').limit(0),
+        supabaseAnon.from('activity_logs').select('id').limit(0),
+        supabaseAnon.from('books').select('id').limit(0),
+        supabaseAnon.from('categories').select('id').limit(0),
+      ]);
+      anonLoansDenied = Boolean(anonLoans.error);
+      anonLoansErrorCode = anonLoans.error?.code;
+      anonProfilesDenied = Boolean(anonProfiles.error);
+      anonProfilesErrorCode = anonProfiles.error?.code;
+      anonActivityLogsDenied = Boolean(anonLogs.error);
+      anonActivityLogsErrorCode = anonLogs.error?.code;
+      anonBooksReadable = !anonBooks.error;
+      anonBooksErrorCode = anonBooks.error?.code;
+      anonCategoriesReadable = !anonCats.error;
+      anonCategoriesErrorCode = anonCats.error?.code;
+    } catch (anonErr: any) {
+      anonLoansErrorCode = anonErr?.message || 'ANON_PROBE_ERROR';
+    }
+  }
+
+  return {
+    profilesArchiveColumnsOk: !colRes.error,
+    ...(colRes.error ? { profilesArchiveColumnsError: colRes.error.code || colRes.error.message } : {}),
+    hasUserLoanRpcOk,
+    ...(hasUserLoanRpcError ? { hasUserLoanRpcError } : {}),
+    isAdminRpcOk,
+    ...(isAdminRpcError ? { isAdminRpcError } : {}),
+    anonLoansDenied,
+    ...(anonLoansErrorCode ? { anonLoansErrorCode } : {}),
+    anonProfilesDenied,
+    ...(anonProfilesErrorCode ? { anonProfilesErrorCode } : {}),
+    anonActivityLogsDenied,
+    ...(anonActivityLogsErrorCode ? { anonActivityLogsErrorCode } : {}),
+    anonBooksReadable,
+    ...(anonBooksErrorCode ? { anonBooksErrorCode } : {}),
+    anonCategoriesReadable,
+    ...(anonCategoriesErrorCode ? { anonCategoriesErrorCode } : {}),
+    hasDirectDbUrl,
+    hasSupabaseAccessToken,
+  };
+}
+
 export interface ServerAppOptions {
   getAuthClient?: () => { client: SupabaseClient | null; error?: string };
   getAdminClient?: () => { client: SupabaseClient | null; error?: string };
+  getAnonProbeClient?: () => { client: SupabaseClient | null; error?: string };
   superAdminUids?: string[];
 }
 
@@ -519,7 +959,8 @@ async function verifyAdminRequest(
 async function verifyAuthenticatedUser(
   req: Request,
   supabaseAuth: SupabaseClient,
-  supabaseAdmin: SupabaseClient
+  supabaseAdmin: SupabaseClient,
+  actionLabel = 'mengonfirmasi pengembalian buku'
 ): Promise<
   | {
       ok: true;
@@ -540,7 +981,7 @@ async function verifyAuthenticatedUser(
     return {
       ok: false,
       status: 401,
-      error: 'Autentikasi diperlukan untuk mengonfirmasi pengembalian buku.',
+      error: `Autentikasi diperlukan untuk ${actionLabel}.`,
     };
   }
 
@@ -624,20 +1065,58 @@ async function verifyAuthenticatedUser(
   };
 }
 
+function isDbPermissionDeniedError(err: any): boolean {
+  if (!err) return false;
+  return (
+    String(err.code || '').trim() === '42501' ||
+    String(err.message || '').toLowerCase().includes('permission denied')
+  );
+}
+
+function isMissingRpcFunctionError(err: any, functionName: string): boolean {
+  if (!err) return false;
+  const code = String(err.code || '').trim().toUpperCase();
+  const msg = String(err.message || '').toLowerCase();
+  if (code === 'PGRST202' || code === '42883') return true;
+  return (
+    msg.includes(functionName.toLowerCase()) &&
+    (msg.includes('could not find the function') ||
+      msg.includes('does not exist') ||
+      msg.includes('schema cache'))
+  );
+}
+
 async function countVisitorLoans(
   supabaseAdmin: SupabaseClient,
   targetId: string
-): Promise<{ totalLoansCount: number; activeLoansCount: number; error?: string }> {
+): Promise<{
+  totalLoansCount: number;
+  activeLoansCount: number;
+  error?: string;
+  code?: string;
+}> {
   const { count: totalCount, error: totalErr } = await supabaseAdmin
     .from('loans')
     .select('id', { count: 'exact', head: true })
     .eq('user_id', targetId);
 
   if (totalErr) {
+    const permDenied = isDbPermissionDeniedError(totalErr);
+    if (permDenied) {
+      console.error('[VISITOR_LOANS_COUNT_PERMISSION_DENIED]', {
+        targetId,
+        table: 'loans',
+        code: totalErr.code || '42501',
+        keyStatus: inspectServerSupabaseEnv().keyStatus,
+      });
+    }
     return {
       totalLoansCount: 0,
       activeLoansCount: 0,
-      error: `Gagal memeriksa riwayat peminjaman pengunjung: ${totalErr.message}`,
+      error: permDenied
+        ? `Izin database server untuk memeriksa riwayat peminjaman (loans) belum aktif (kode 42501): ${totalErr.message}`
+        : `Gagal memeriksa riwayat peminjaman pengunjung: ${totalErr.message}`,
+      code: permDenied ? 'DB_PERMISSION_DENIED' : totalErr.code || 'LOANS_CHECK_FAILED',
     };
   }
 
@@ -648,10 +1127,22 @@ async function countVisitorLoans(
     .in('status', ['pending', 'approved', 'borrowed']);
 
   if (activeErr) {
+    const permDenied = isDbPermissionDeniedError(activeErr);
+    if (permDenied) {
+      console.error('[VISITOR_LOANS_COUNT_PERMISSION_DENIED]', {
+        targetId,
+        table: 'loans',
+        code: activeErr.code || '42501',
+        keyStatus: inspectServerSupabaseEnv().keyStatus,
+      });
+    }
     return {
       totalLoansCount: totalCount ?? 0,
       activeLoansCount: 0,
-      error: `Gagal memeriksa pinjaman aktif pengunjung: ${activeErr.message}`,
+      error: permDenied
+        ? `Izin database server untuk memeriksa pinjaman aktif (loans) belum aktif (kode 42501): ${activeErr.message}`
+        : `Gagal memeriksa pinjaman aktif pengunjung: ${activeErr.message}`,
+      code: permDenied ? 'DB_PERMISSION_DENIED' : activeErr.code || 'LOANS_CHECK_FAILED',
     };
   }
 
@@ -720,20 +1211,83 @@ function isUserCurrentlyBanned(bannedUntil: string | null | undefined): boolean 
 
 export function createApp(options: ServerAppOptions = {}) {
   const app = express();
+  app.set('etag', false);
+
   const getAdminClient = options.getAdminClient ?? defaultCreateSupabaseAdminClient;
   const getAuthClient =
     options.getAuthClient ??
     (options.getAdminClient ? options.getAdminClient : defaultCreateSupabaseAuthClient);
+  const getAnonProbeClient =
+    options.getAnonProbeClient ??
+    (options.getAdminClient || options.getAuthClient
+      ? () => ({ client: null })
+      : () => defaultCreateSupabaseAnonProbeClient());
   const resolvedSuperAdminUids = options.superAdminUids ?? getSuperAdminUids();
 
+  const bookStockLocks = new Map<string, Promise<void>>();
+  async function withBookStockLock<T>(
+    bookId: string | null | undefined,
+    fn: () => Promise<T>
+  ): Promise<T> {
+    const key = String(bookId || '').trim();
+    if (!key) return fn();
+    const prev = bookStockLocks.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const queued = prev.then(() => gate, () => gate);
+    bookStockLocks.set(key, queued);
+    try {
+      await prev.catch(() => undefined);
+      return await fn();
+    } finally {
+      release();
+      if (bookStockLocks.get(key) === queued) {
+        bookStockLocks.delete(key);
+      }
+    }
+  }
+
+  app.use('/api', (_req: Request, res: Response, next: NextFunction) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    res.removeHeader('ETag');
+    next();
+  });
+
   app.use(express.json());
+  app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
+    if (err instanceof SyntaxError && 'body' in err) {
+      return res.status(400).json({
+        error: 'Format JSON pada isi permintaan tidak valid.',
+        code: 'INVALID_JSON',
+      });
+    }
+    return next(err);
+  });
 
   // Health and status endpoint (memeriksa keberadaan env server tanpa mencetak nilai rahasia)
   app.get('/api/health', async (req: Request, res: Response) => {
     const envInspection = inspectServerSupabaseEnv();
-    const shouldProbeProfiles = req.query.probe === 'profiles';
+    const envAudit = inspectVercelEnvChecklist();
+    const probeParam = String(req.query.probe || '').trim().toLowerCase();
+    const shouldProbeProfiles = probeParam === 'profiles';
+    const shouldProbeReturn = probeParam === 'return' || probeParam === 'all';
+    const shouldProbeStorage = probeParam === 'storage' || probeParam === 'all';
+    const shouldProbeMigrations = probeParam === 'migrations' || probeParam === 'all';
     const profilesProbe = shouldProbeProfiles
       ? await probeAdminProfilesAccess(() => getAdminClient())
+      : undefined;
+    const returnTablesProbe = shouldProbeReturn
+      ? await probeAdminReturnTablesAccess(() => getAdminClient(), envInspection)
+      : undefined;
+    const catalogAndStorageProbe = shouldProbeStorage
+      ? await probeAdminStorageAndCatalogAccess(() => getAdminClient())
+      : undefined;
+    const migrationProbe = shouldProbeMigrations
+      ? await probeDatabaseMigrations(() => getAdminClient(), () => getAnonProbeClient())
       : undefined;
 
     res.json({
@@ -747,7 +1301,11 @@ export function createApp(options: ServerAppOptions = {}) {
         serviceRoleKeyStatus: envInspection.keyStatus,
         hasUrlMismatch: envInspection.hasUrlMismatch,
       },
+      envAudit,
       ...(profilesProbe ? { profilesProbe } : {}),
+      ...(returnTablesProbe ? { returnTablesProbe } : {}),
+      ...(catalogAndStorageProbe ? { catalogAndStorageProbe } : {}),
+      ...(migrationProbe ? { migrationProbe } : {}),
       timestamp: new Date().toISOString(),
     });
   });
@@ -794,11 +1352,16 @@ export function createApp(options: ServerAppOptions = {}) {
       >();
 
       try {
-        const { data: listData, error: listError } = await supabaseAdmin.auth.admin.listUsers({
-          page: 1,
-          perPage: 1000,
-        });
-        if (!listError && listData?.users) {
+        const perPage = 1000;
+        const maxPages = 20;
+        for (let page = 1; page <= maxPages; page += 1) {
+          const { data: listData, error: listError } = await supabaseAdmin.auth.admin.listUsers({
+            page,
+            perPage,
+          });
+          if (listError || !listData?.users || listData.users.length === 0) {
+            break;
+          }
           for (const authUser of listData.users) {
             const meta = (authUser.user_metadata || {}) as Record<string, any>;
             const banned = isUserCurrentlyBanned((authUser as any).banned_until);
@@ -809,6 +1372,9 @@ export function createApp(options: ServerAppOptions = {}) {
               archived_at: (meta.archived_at as string | undefined) ?? null,
               is_super_admin: isTargetAuthSuperAdmin(authUser),
             });
+          }
+          if (listData.users.length < perPage) {
+            break;
           }
         }
       } catch (listErr) {
@@ -887,14 +1453,22 @@ export function createApp(options: ServerAppOptions = {}) {
       }
 
       let authTargetUser: any = null;
-      try {
-        const { data: authTarget, error: authTargetErr } =
-          await supabaseAdmin.auth.admin.getUserById(targetId);
-        if (!authTargetErr && authTarget?.user) {
-          authTargetUser = authTarget.user;
+      const { data: authTarget, error: authTargetErr } =
+        await supabaseAdmin.auth.admin.getUserById(targetId);
+      if (authTargetErr) {
+        const lowerAuthErr = String(authTargetErr.message || '').toLowerCase();
+        const isNotFound =
+          (authTargetErr as any)?.status === 404 ||
+          lowerAuthErr.includes('not found') ||
+          lowerAuthErr.includes('no user');
+        if (!isNotFound) {
+          return res.status(500).json({
+            error: `Gagal memverifikasi akun target pada Supabase Authentication sebelum penghapusan: ${authTargetErr.message}`,
+            code: 'AUTH_LOOKUP_FAILED',
+          });
         }
-      } catch {
-        // Lanjutkan pemeriksaan berdasarkan profil apabila lookup Auth gagal sementara
+      } else if (authTarget?.user) {
+        authTargetUser = authTarget.user;
       }
 
       if (!targetProfile && !authTargetUser) {
@@ -918,7 +1492,10 @@ export function createApp(options: ServerAppOptions = {}) {
       // Periksa jumlah riwayat peminjaman dan pinjaman aktif pada tabel loans
       const loanStats = await countVisitorLoans(supabaseAdmin, targetId);
       if (loanStats.error) {
-        return res.status(500).json({ error: loanStats.error });
+        return res.status(500).json({
+          error: loanStats.error,
+          code: loanStats.code || 'LOANS_CHECK_FAILED',
+        });
       }
 
       const evaluation = evaluateVisitorRemovalEligibility({
@@ -941,14 +1518,23 @@ export function createApp(options: ServerAppOptions = {}) {
         });
       }
 
-      // Snapshot profil & referensi non-pinjaman sebelum mutasi agar dapat di-rollback bila salah satu tahap gagal
+      // Snapshot referensi non-pinjaman yang relevan sebelum mutasi (fail-closed: hentikan seluruh penghapusan bila snapshot gagal).
+      // Catatan: tabel categories adalah tabel katalog Admin-only dan TIDAK disentuh/disnapshot saat menghapus pengunjung.
       const { data: logsSnapshot, error: logsSnapErr } = await supabaseAdmin
         .from('activity_logs')
-        .select('id')
+        .select('*')
         .eq('actor_id', targetId);
       if (logsSnapErr) {
+        const permDenied = isDbPermissionDeniedError(logsSnapErr);
+        console.error('[VISITOR_DELETE_SNAPSHOT_ERROR]', {
+          targetId,
+          table: 'activity_logs',
+          code: logsSnapErr.code,
+          keyStatus: inspectServerSupabaseEnv().keyStatus,
+        });
         return res.status(500).json({
           error: `Gagal mengambil snapshot activity_logs sebelum penghapusan: ${logsSnapErr.message}`,
+          code: permDenied ? 'DB_PERMISSION_DENIED' : 'SNAPSHOT_FAILED',
         });
       }
 
@@ -957,34 +1543,27 @@ export function createApp(options: ServerAppOptions = {}) {
         .select('id')
         .eq('created_by', targetId);
       if (booksSnapErr) {
+        const permDenied = isDbPermissionDeniedError(booksSnapErr);
+        console.error('[VISITOR_DELETE_SNAPSHOT_ERROR]', {
+          targetId,
+          table: 'books',
+          code: booksSnapErr.code,
+          keyStatus: inspectServerSupabaseEnv().keyStatus,
+        });
         return res.status(500).json({
           error: `Gagal mengambil snapshot books sebelum penghapusan: ${booksSnapErr.message}`,
-        });
-      }
-
-      const { data: categoriesSnapshot, error: catsSnapErr } = await supabaseAdmin
-        .from('categories')
-        .select('id')
-        .eq('created_by', targetId);
-      if (catsSnapErr) {
-        return res.status(500).json({
-          error: `Gagal mengambil snapshot categories sebelum penghapusan: ${catsSnapErr.message}`,
+          code: permDenied ? 'DB_PERMISSION_DENIED' : 'SNAPSHOT_FAILED',
         });
       }
 
       const bookIdsToRestore = Array.isArray(booksSnapshot)
         ? booksSnapshot.map((b: any) => b.id).filter(Boolean)
         : [];
-      const categoryIdsToRestore = Array.isArray(categoriesSnapshot)
-        ? categoriesSnapshot.map((c: any) => c.id).filter(Boolean)
-        : [];
-      const logIdsToRestore = Array.isArray(logsSnapshot)
-        ? logsSnapshot.map((l: any) => l.id).filter(Boolean)
-        : [];
+      const logRowsToRestore = Array.isArray(logsSnapshot) ? logsSnapshot : [];
+      const logIdsToRestore = logRowsToRestore.map((l: any) => l.id).filter(Boolean);
 
-      let logsCleared = false;
+      let logsClearMode: 'none' | 'nullified' | 'deleted' = 'none';
       let booksCleared = false;
-      let catsCleared = false;
 
       const rollbackReferencesAndProfile = async (
         restoreProfileRow: boolean
@@ -1042,37 +1621,7 @@ export function createApp(options: ServerAppOptions = {}) {
           }
         }
 
-        if (catsCleared) {
-          for (const catId of categoryIdsToRestore) {
-            try {
-              const { error: restoreCatErr } = await supabaseAdmin
-                .from('categories')
-                .update({ created_by: targetId })
-                .eq('id', catId);
-              if (restoreCatErr) {
-                failures.push({
-                  step: 'restore_category_creator',
-                  table: 'categories',
-                  recordId: String(catId),
-                  message:
-                    restoreCatErr.message ||
-                    'Gagal memulihkan kolom created_by pada tabel categories.',
-                });
-              }
-            } catch (err: any) {
-              failures.push({
-                step: 'restore_category_creator',
-                table: 'categories',
-                recordId: String(catId),
-                message:
-                  err?.message ||
-                  'Pengecualian saat memulihkan kolom created_by pada tabel categories.',
-              });
-            }
-          }
-        }
-
-        if (logsCleared) {
+        if (logsClearMode === 'nullified') {
           for (const logId of logIdsToRestore) {
             try {
               const { error: restoreLogErr } = await supabaseAdmin
@@ -1100,6 +1649,33 @@ export function createApp(options: ServerAppOptions = {}) {
               });
             }
           }
+        } else if (logsClearMode === 'deleted' && logRowsToRestore.length > 0) {
+          for (const logRow of logRowsToRestore) {
+            try {
+              const { error: reinsertLogErr } = await supabaseAdmin
+                .from('activity_logs')
+                .insert(logRow);
+              if (reinsertLogErr) {
+                failures.push({
+                  step: 'restore_activity_log_row',
+                  table: 'activity_logs',
+                  recordId: String(logRow?.id || targetId),
+                  message:
+                    reinsertLogErr.message ||
+                    'Gagal memulihkan baris activity_logs setelah gagal penghapusan.',
+                });
+              }
+            } catch (err: any) {
+              failures.push({
+                step: 'restore_activity_log_row',
+                table: 'activity_logs',
+                recordId: String(logRow?.id || targetId),
+                message:
+                  err?.message ||
+                  'Pengecualian saat memulihkan baris activity_logs setelah gagal penghapusan.',
+              });
+            }
+          }
         }
 
         if (failures.length > 0) {
@@ -1116,59 +1692,64 @@ export function createApp(options: ServerAppOptions = {}) {
         };
       };
 
-      // 1. Lepaskan referensi non-pinjaman tanpa menghapus baris histori activity_logs
-      const { error: clearLogsErr } = await supabaseAdmin
-        .from('activity_logs')
-        .update({ actor_id: null })
-        .eq('actor_id', targetId);
-      if (clearLogsErr) {
-        return res.status(500).json({
-          error: `Gagal melepaskan referensi actor_id pada activity_logs sebelum penghapusan (pastikan migrasi ON DELETE SET NULL sudah dijalankan): ${clearLogsErr.message}`,
-        });
-      }
-      logsCleared = true;
+      // 1. Lepaskan referensi non-pinjaman yang relevan tanpa menghapus baris histori activity_logs;
+      //    fallback hapus log pengunjung hanya bila kolom actor_id di database masih NOT NULL (SQLSTATE 23502).
+      if (logRowsToRestore.length > 0) {
+        const { error: clearLogsErr } = await supabaseAdmin
+          .from('activity_logs')
+          .update({ actor_id: null })
+          .eq('actor_id', targetId);
+        if (clearLogsErr) {
+          const logErrCode = String(clearLogsErr.code || '').trim();
+          const logErrMsg = String(clearLogsErr.message || '').toLowerCase();
+          const isNotNullViolation =
+            logErrCode === '23502' ||
+            logErrMsg.includes('null value in column "actor_id"') ||
+            logErrMsg.includes('violates not-null constraint');
 
-      const { error: clearBooksErr } = await supabaseAdmin
-        .from('books')
-        .update({ created_by: null })
-        .eq('created_by', targetId);
-      if (clearBooksErr) {
-        const rollback = await rollbackReferencesAndProfile(false);
-        if (!rollback.complete) {
+          if (isNotNullViolation) {
+            const { error: deleteLogsErr } = await supabaseAdmin
+              .from('activity_logs')
+              .delete()
+              .eq('actor_id', targetId);
+            if (deleteLogsErr) {
+              return res.status(500).json({
+                error: `Gagal membersihkan referensi actor_id pada activity_logs sebelum penghapusan: ${deleteLogsErr.message}`,
+              });
+            }
+            logsClearMode = 'deleted';
+          } else {
+            return res.status(500).json({
+              error: `Gagal melepaskan referensi actor_id pada activity_logs sebelum penghapusan (pastikan migrasi ON DELETE SET NULL sudah dijalankan): ${clearLogsErr.message}`,
+            });
+          }
+        } else {
+          logsClearMode = 'nullified';
+        }
+      }
+
+      if (bookIdsToRestore.length > 0) {
+        const { error: clearBooksErr } = await supabaseAdmin
+          .from('books')
+          .update({ created_by: null })
+          .eq('created_by', targetId);
+        if (clearBooksErr) {
+          const rollback = await rollbackReferencesAndProfile(false);
+          if (!rollback.complete) {
+            return res.status(500).json({
+              error: `Gagal melepaskan referensi buku (${clearBooksErr.message}), dan pemulihan rollback tidak lengkap (${rollback.failures.length} kegagalan). Data referensi mungkin tidak konsisten.`,
+              code: 'ROLLBACK_INCOMPLETE',
+              rollbackComplete: false,
+              rollbackFailures: rollback.failures,
+            });
+          }
           return res.status(500).json({
-            error: `Gagal melepaskan referensi buku (${clearBooksErr.message}), dan pemulihan rollback tidak lengkap (${rollback.failures.length} kegagalan). Data referensi mungkin tidak konsisten.`,
-            code: 'ROLLBACK_INCOMPLETE',
-            rollbackComplete: false,
-            rollbackFailures: rollback.failures,
+            error: `Gagal melepaskan referensi buku sebelum penghapusan (referensi log aktivitas telah dipulihkan): ${clearBooksErr.message}`,
+            rollbackComplete: true,
           });
         }
-        return res.status(500).json({
-          error: `Gagal melepaskan referensi buku sebelum penghapusan (referensi log aktivitas telah dipulihkan): ${clearBooksErr.message}`,
-          rollbackComplete: true,
-        });
+        booksCleared = true;
       }
-      booksCleared = true;
-
-      const { error: clearCatsErr } = await supabaseAdmin
-        .from('categories')
-        .update({ created_by: null })
-        .eq('created_by', targetId);
-      if (clearCatsErr) {
-        const rollback = await rollbackReferencesAndProfile(false);
-        if (!rollback.complete) {
-          return res.status(500).json({
-            error: `Gagal melepaskan referensi kategori (${clearCatsErr.message}), dan pemulihan rollback tidak lengkap (${rollback.failures.length} kegagalan). Data referensi mungkin tidak konsisten.`,
-            code: 'ROLLBACK_INCOMPLETE',
-            rollbackComplete: false,
-            rollbackFailures: rollback.failures,
-          });
-        }
-        return res.status(500).json({
-          error: `Gagal melepaskan referensi kategori sebelum penghapusan (referensi sebelumnya telah dipulihkan): ${clearCatsErr.message}`,
-          rollbackComplete: true,
-        });
-      }
-      catsCleared = true;
 
       // 2. Hapus baris public.profiles terlebih dahulu (sebelum Auth dihapus).
       //    Bila trigger DB atau FK pinjaman menolak, Auth belum tersentuh dan referensi bisa langsung di-rollback.
@@ -1190,11 +1771,30 @@ export function createApp(options: ServerAppOptions = {}) {
             });
           }
 
-          const lowerProfileErr = deleteProfileError.message.toLowerCase();
+          const lowerProfileErr = (deleteProfileError.message || '').toLowerCase();
           if (lowerProfileErr.includes('super admin')) {
             return res.status(403).json({
               error: deleteProfileError.message,
               code: 'SUPER_ADMIN_PROTECTED',
+              rollbackComplete: true,
+            });
+          }
+          if (
+            String(deleteProfileError.code || '').trim() === '23503' ||
+            lowerProfileErr.includes('foreign key') ||
+            lowerProfileErr.includes('still referenced')
+          ) {
+            return res.status(409).json({
+              error:
+                'Akun pengunjung tidak dapat dihapus permanen karena masih memiliki data terkait di tabel lain (perubahan referensi telah dibatalkan). Gunakan fitur Arsipkan Pengunjung agar histori tetap aman.',
+              code: 'VISITOR_DELETE_CONFLICT',
+              rollbackComplete: true,
+            });
+          }
+          if (isDbPermissionDeniedError(deleteProfileError)) {
+            return res.status(500).json({
+              error: `Izin database server untuk menghapus baris public.profiles belum aktif (kode 42501, seluruh referensi telah dipulihkan): ${deleteProfileError.message}`,
+              code: 'DB_PERMISSION_DENIED',
               rollbackComplete: true,
             });
           }
@@ -1293,11 +1893,8 @@ export function createApp(options: ServerAppOptions = {}) {
     }
   };
 
-  app.post('/api/admin/visitors/:id/delete', handleDeleteVisitorRequest);
-  app.delete('/api/admin/visitors/:id', handleDeleteVisitorRequest);
-
   // Mengarsipkan / menonaktifkan akun pengunjung yang memiliki riwayat peminjaman (ditolak bila masih punya pinjaman aktif)
-  app.post('/api/admin/visitors/:id/archive', async (req: Request, res: Response) => {
+  const handleArchiveVisitorRequest = async (req: Request, res: Response) => {
     try {
       const authHeader = req.headers.authorization || '';
       if (!authHeader.startsWith('Bearer ') || !authHeader.slice('Bearer '.length).trim()) {
@@ -1478,10 +2075,10 @@ export function createApp(options: ServerAppOptions = {}) {
         error: err?.message || 'Terjadi kesalahan server saat mengarsipkan akun pengunjung.',
       });
     }
-  });
+  };
 
   // Mengaktifkan kembali akun pengunjung yang sebelumnya diarsipkan
-  app.post('/api/admin/visitors/:id/restore', async (req: Request, res: Response) => {
+  const handleRestoreVisitorRequest = async (req: Request, res: Response) => {
     try {
       const authHeader = req.headers.authorization || '';
       if (!authHeader.startsWith('Bearer ') || !authHeader.slice('Bearer '.length).trim()) {
@@ -1656,11 +2253,1196 @@ export function createApp(options: ServerAppOptions = {}) {
         error: err?.message || 'Terjadi kesalahan server saat mengaktifkan kembali akun pengunjung.',
       });
     }
+  };
+
+  // Menambahkan akun pengunjung baru oleh Admin (membuat akun Supabase Auth + baris public.profiles)
+  const handleCreateVisitorRequest = async (req: Request, res: Response) => {
+    try {
+      const authHeader = req.headers.authorization || '';
+      if (!authHeader.startsWith('Bearer ') || !authHeader.slice('Bearer '.length).trim()) {
+        return res.status(401).json({
+          error: 'Autentikasi diperlukan. Token sesi administrator tidak ditemukan.',
+        });
+      }
+
+      const { client: supabaseAuth, error: authClientError } = getAuthClient();
+      const { client: supabaseAdmin, error: adminClientError } = getAdminClient();
+      if (!supabaseAuth || !supabaseAdmin) {
+        return res.status(500).json({
+          error: adminClientError || authClientError || 'Konfigurasi server belum lengkap.',
+        });
+      }
+
+      const authCheck = await verifyAdminRequest(req, supabaseAuth, supabaseAdmin);
+      if (!authCheck.ok) {
+        return res.status(authCheck.status).json({ error: authCheck.error });
+      }
+
+      const body = (req.body || {}) as Record<string, unknown>;
+      const cleanFullName = String(body.full_name ?? body.fullName ?? '').trim();
+      const cleanUsername = String(body.username ?? '').trim();
+      const cleanEmail = String(body.email ?? '').trim().toLowerCase();
+      const cleanPassword = String(body.password ?? '');
+
+      if (cleanFullName.length < 3) {
+        return res.status(400).json({
+          error: 'Nama lengkap pengunjung minimal 3 karakter.',
+          code: 'INVALID_FULL_NAME',
+        });
+      }
+
+      if (!/^[a-zA-Z0-9_]{3,20}$/.test(cleanUsername)) {
+        return res.status(400).json({
+          error: 'Username harus 3-20 karakter alfanumerik (huruf, angka, garis bawah).',
+          code: 'INVALID_USERNAME',
+        });
+      }
+
+      const lowerUsername = cleanUsername.toLowerCase();
+      if (
+        lowerUsername === 'admin' ||
+        lowerUsername === 'super_admin' ||
+        lowerUsername === 'superadmin'
+      ) {
+        return res.status(400).json({
+          error: 'Username tersebut dicadangkan untuk akun sistem.',
+          code: 'RESERVED_USERNAME',
+        });
+      }
+
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+        return res.status(400).json({
+          error: 'Format alamat email pengunjung tidak valid.',
+          code: 'INVALID_EMAIL',
+        });
+      }
+
+      if (cleanPassword.length < 6) {
+        return res.status(400).json({
+          error: 'Kata sandi awal pengunjung minimal 6 karakter.',
+          code: 'INVALID_PASSWORD',
+        });
+      }
+
+      const { data: existingUsernames, error: usernameCheckErr } = await supabaseAdmin
+        .from('profiles')
+        .select('id, username')
+        .ilike('username', cleanUsername)
+        .limit(1);
+
+      if (usernameCheckErr) {
+        return res.status(500).json({
+          error: `Gagal memverifikasi ketersediaan username: ${usernameCheckErr.message}`,
+        });
+      }
+
+      if (existingUsernames && existingUsernames.length > 0) {
+        return res.status(409).json({
+          error: `Username "@${cleanUsername}" sudah digunakan oleh anggota lain.`,
+          code: 'USERNAME_TAKEN',
+        });
+      }
+
+      const { data: createdAuthData, error: createAuthErr } =
+        await supabaseAdmin.auth.admin.createUser({
+          email: cleanEmail,
+          password: cleanPassword,
+          email_confirm: true,
+          user_metadata: {
+            full_name: cleanFullName,
+            username: cleanUsername,
+            role: 'visitor',
+            is_active: true,
+          },
+        });
+
+      if (createAuthErr || !createdAuthData?.user?.id) {
+        const msg = createAuthErr?.message || 'Gagal membuat akun di Supabase Authentication.';
+        const lowerMsg = msg.toLowerCase();
+        if (lowerMsg.includes('already registered') || lowerMsg.includes('already exists')) {
+          return res.status(409).json({
+            error: `Alamat email "${cleanEmail}" sudah terdaftar.`,
+            code: 'EMAIL_TAKEN',
+          });
+        }
+        return res.status(500).json({
+          error: `Gagal membuat akun pengunjung di Supabase Authentication: ${msg}`,
+        });
+      }
+
+      const newUserId = createdAuthData.user.id;
+      const nowIso = new Date().toISOString();
+
+      const { data: triggerProfile } = await supabaseAdmin
+        .from('profiles')
+        .select('*')
+        .eq('id', newUserId)
+        .maybeSingle();
+
+      let savedProfile: any = null;
+      let profileSyncError: any = null;
+
+      if (triggerProfile) {
+        const updateFull = await supabaseAdmin
+          .from('profiles')
+          .update({
+            full_name: cleanFullName,
+            username: cleanUsername,
+            role: 'visitor',
+            is_active: true,
+            archived_at: null,
+            archived_by: null,
+            updated_at: nowIso,
+          })
+          .eq('id', newUserId)
+          .select('*');
+
+        if (updateFull.error && isMissingColumnError(updateFull.error)) {
+          const updateBasic = await supabaseAdmin
+            .from('profiles')
+            .update({
+              full_name: cleanFullName,
+              username: cleanUsername,
+              role: 'visitor',
+              updated_at: nowIso,
+            })
+            .eq('id', newUserId)
+            .select('*');
+          savedProfile = updateBasic.data?.[0] ?? null;
+          profileSyncError = updateBasic.error;
+        } else {
+          savedProfile = updateFull.data?.[0] ?? null;
+          profileSyncError = updateFull.error;
+        }
+      } else {
+        const insertFull = await supabaseAdmin
+          .from('profiles')
+          .insert({
+            id: newUserId,
+            full_name: cleanFullName,
+            username: cleanUsername,
+            role: 'visitor',
+            is_active: true,
+            archived_at: null,
+            archived_by: null,
+            created_at: nowIso,
+            updated_at: nowIso,
+          })
+          .select('*');
+
+        if (insertFull.error && isMissingColumnError(insertFull.error)) {
+          const insertBasic = await supabaseAdmin
+            .from('profiles')
+            .insert({
+              id: newUserId,
+              full_name: cleanFullName,
+              username: cleanUsername,
+              role: 'visitor',
+              created_at: nowIso,
+              updated_at: nowIso,
+            })
+            .select('*');
+          savedProfile = insertBasic.data?.[0] ?? null;
+          profileSyncError = insertBasic.error;
+        } else {
+          savedProfile = insertFull.data?.[0] ?? null;
+          profileSyncError = insertFull.error;
+        }
+      }
+
+      if (profileSyncError) {
+        let authCleanupError: string | null = null;
+        try {
+          const { error: cleanupErr } = await supabaseAdmin.auth.admin.deleteUser(newUserId);
+          if (cleanupErr) {
+            authCleanupError = cleanupErr.message || 'Gagal menghapus akun Auth sementara.';
+          }
+        } catch (err: any) {
+          authCleanupError = err?.message || 'Pengecualian saat membatalkan akun Auth sementara.';
+        }
+
+        if (authCleanupError) {
+          console.error('[VISITOR_CREATE_ROLLBACK_INCOMPLETE]', {
+            newUserId,
+            message: authCleanupError,
+          });
+          return res.status(500).json({
+            error: `Gagal menyimpan profil pengunjung (${profileSyncError.message}), dan pembersihan akun Auth sementara gagal (${authCleanupError}).`,
+            code: 'ROLLBACK_INCOMPLETE',
+            rollbackComplete: false,
+          });
+        }
+
+        return res.status(500).json({
+          error: `Gagal menyimpan profil pengunjung ke database (akun Auth sementara dibatalkan): ${profileSyncError.message}`,
+          rollbackComplete: true,
+        });
+      }
+
+      try {
+        await supabaseAdmin.from('activity_logs').insert({
+          actor_id: authCheck.adminProfile.id,
+          action: 'create_visitor',
+          entity_type: 'profiles',
+          entity_id: newUserId,
+          details: JSON.stringify({
+            full_name: cleanFullName,
+            username: cleanUsername,
+            email: cleanEmail,
+          }),
+          created_at: nowIso,
+        });
+      } catch {
+        // Abaikan error logging non-kritikal
+      }
+
+      return res.status(201).json({
+        success: true,
+        visitor: {
+          ...(savedProfile || {
+            id: newUserId,
+            full_name: cleanFullName,
+            username: cleanUsername,
+            role: 'visitor',
+            is_active: true,
+            archived_at: null,
+            created_at: nowIso,
+            updated_at: nowIso,
+          }),
+          email: createdAuthData.user.email || cleanEmail,
+          is_active: true,
+          archived_at: null,
+        },
+        message: `Akun pengunjung "${cleanFullName}" berhasil dibuat dan siap digunakan.`,
+      });
+    } catch (err: any) {
+      return res.status(500).json({
+        error: err?.message || 'Terjadi kesalahan server saat menambahkan akun pengunjung.',
+      });
+    }
+  };
+
+  // Memperbarui data nama lengkap / username akun pengunjung (khusus Admin)
+  const handleUpdateVisitorRequest = async (req: Request, res: Response) => {
+    try {
+      const authHeader = req.headers.authorization || '';
+      if (!authHeader.startsWith('Bearer ') || !authHeader.slice('Bearer '.length).trim()) {
+        return res.status(401).json({
+          error: 'Autentikasi diperlukan. Token sesi administrator tidak ditemukan.',
+        });
+      }
+
+      const targetId = String(req.params.id || '').trim();
+      const { client: supabaseAuth, error: authClientError } = getAuthClient();
+      const { client: supabaseAdmin, error: adminClientError } = getAdminClient();
+      if (!supabaseAuth || !supabaseAdmin) {
+        return res.status(500).json({
+          error: adminClientError || authClientError || 'Konfigurasi server belum lengkap.',
+        });
+      }
+
+      const authCheck = await verifyAdminRequest(req, supabaseAuth, supabaseAdmin);
+      if (!authCheck.ok) {
+        return res.status(authCheck.status).json({ error: authCheck.error });
+      }
+
+      if (!isValidUuid(targetId)) {
+        return res.status(400).json({ error: 'ID akun pengunjung tidak valid.' });
+      }
+
+      if (targetId === authCheck.adminProfile.id) {
+        return res.status(400).json({
+          error: 'Gunakan halaman profil pribadi untuk mengubah data akun Anda sendiri.',
+          code: 'SELF_EDIT_FORBIDDEN',
+        });
+      }
+
+      const { data: targetProfile, error: targetProfileError } = await supabaseAdmin
+        .from('profiles')
+        .select('*')
+        .eq('id', targetId)
+        .maybeSingle();
+
+      if (targetProfileError) {
+        return res.status(500).json({
+          error: `Gagal memeriksa profil pengunjung: ${targetProfileError.message}`,
+        });
+      }
+
+      if (!targetProfile) {
+        return res.status(404).json({ error: 'Akun pengunjung tidak ditemukan di database.' });
+      }
+
+      let authTargetUser: any = null;
+      try {
+        const { data: authTargetData, error: authTargetErr } =
+          await supabaseAdmin.auth.admin.getUserById(targetId);
+        if (!authTargetErr && authTargetData?.user) {
+          authTargetUser = authTargetData.user;
+        }
+      } catch {
+        // Lanjutkan berdasarkan data profil bila Auth lookup tidak tersedia
+      }
+
+      const targetIsSuperAdmin = Boolean(
+        targetProfile.is_super_admin === true ||
+          targetProfile.role === 'super_admin' ||
+          resolvedSuperAdminUids.includes(targetId) ||
+          isTargetAuthSuperAdmin(authTargetUser)
+      );
+
+      if (targetIsSuperAdmin) {
+        return res.status(403).json({
+          error: 'Akun Super Admin dilindungi oleh sistem dan tidak dapat diubah melalui menu pengunjung.',
+          code: 'SUPER_ADMIN_PROTECTED',
+        });
+      }
+
+      if (targetProfile.role === 'admin') {
+        return res.status(403).json({
+          error: 'Akun administrator tidak dapat diubah melalui menu daftar pengunjung.',
+          code: 'ADMIN_EDIT_FORBIDDEN',
+        });
+      }
+
+      const body = (req.body || {}) as Record<string, unknown>;
+      const hasFullName = body.full_name !== undefined || body.fullName !== undefined;
+      const hasUsername = body.username !== undefined;
+
+      if (!hasFullName && !hasUsername) {
+        return res.status(400).json({
+          error: 'Minimal isi perubahan nama lengkap atau username pengunjung.',
+          code: 'NO_FIELDS_TO_UPDATE',
+        });
+      }
+
+      const nextFullName = hasFullName
+        ? String(body.full_name ?? body.fullName ?? '').trim()
+        : String(targetProfile.full_name || '').trim();
+      const nextUsername = hasUsername
+        ? String(body.username ?? '').trim()
+        : String(targetProfile.username || '').trim();
+
+      if (nextFullName.length < 3) {
+        return res.status(400).json({
+          error: 'Nama lengkap pengunjung minimal 3 karakter.',
+          code: 'INVALID_FULL_NAME',
+        });
+      }
+
+      if (!/^[a-zA-Z0-9_]{3,20}$/.test(nextUsername)) {
+        return res.status(400).json({
+          error: 'Username harus 3-20 karakter alfanumerik (huruf, angka, garis bawah).',
+          code: 'INVALID_USERNAME',
+        });
+      }
+
+      const lowerUsername = nextUsername.toLowerCase();
+      if (
+        lowerUsername === 'admin' ||
+        lowerUsername === 'super_admin' ||
+        lowerUsername === 'superadmin'
+      ) {
+        return res.status(400).json({
+          error: 'Username tersebut dicadangkan untuk akun sistem.',
+          code: 'RESERVED_USERNAME',
+        });
+      }
+
+      if (
+        hasUsername &&
+        nextUsername.toLowerCase() !== String(targetProfile.username || '').toLowerCase()
+      ) {
+        const { data: dupUsernames, error: dupErr } = await supabaseAdmin
+          .from('profiles')
+          .select('id, username')
+          .ilike('username', nextUsername)
+          .neq('id', targetId)
+          .limit(1);
+
+        if (dupErr) {
+          return res.status(500).json({
+            error: `Gagal memeriksa keunikan username: ${dupErr.message}`,
+          });
+        }
+
+        if (dupUsernames && dupUsernames.length > 0) {
+          return res.status(409).json({
+            error: `Username "@${nextUsername}" sudah digunakan oleh anggota lain.`,
+            code: 'USERNAME_TAKEN',
+          });
+        }
+      }
+
+      const nowIso = new Date().toISOString();
+      const { error: updateProfileErr } = await supabaseAdmin
+        .from('profiles')
+        .update({
+          full_name: nextFullName,
+          username: nextUsername,
+          updated_at: nowIso,
+        })
+        .eq('id', targetId);
+
+      if (updateProfileErr) {
+        return res.status(500).json({
+          error: `Gagal memperbarui data profil pengunjung: ${updateProfileErr.message}`,
+        });
+      }
+
+      if (authTargetUser) {
+        const existingMeta = (authTargetUser.user_metadata || {}) as Record<string, any>;
+        const { error: authMetaErr } = await supabaseAdmin.auth.admin.updateUserById(targetId, {
+          user_metadata: {
+            ...existingMeta,
+            full_name: nextFullName,
+            username: nextUsername,
+          },
+        });
+
+        if (authMetaErr) {
+          const { error: rollbackProfileErr } = await supabaseAdmin
+            .from('profiles')
+            .update({
+              full_name: targetProfile.full_name,
+              username: targetProfile.username,
+              updated_at: targetProfile.updated_at || nowIso,
+            })
+            .eq('id', targetId);
+
+          if (rollbackProfileErr) {
+            return res.status(500).json({
+              error: `Gagal menyinkronkan metadata Supabase Auth (${authMetaErr.message}) dan rollback profil gagal (${rollbackProfileErr.message}).`,
+              code: 'ROLLBACK_INCOMPLETE',
+              rollbackComplete: false,
+            });
+          }
+
+          return res.status(500).json({
+            error: `Gagal menyinkronkan metadata Supabase Auth (perubahan profil dibatalkan): ${authMetaErr.message}`,
+            rollbackComplete: true,
+          });
+        }
+      }
+
+      const { data: latestProfile } = await supabaseAdmin
+        .from('profiles')
+        .select('*')
+        .eq('id', targetId)
+        .maybeSingle();
+
+      try {
+        await supabaseAdmin.from('activity_logs').insert({
+          actor_id: authCheck.adminProfile.id,
+          action: 'update_visitor',
+          entity_type: 'profiles',
+          entity_id: targetId,
+          details: JSON.stringify({
+            full_name: nextFullName,
+            username: nextUsername,
+          }),
+          created_at: nowIso,
+        });
+      } catch {
+        // Abaikan error logging non-kritikal
+      }
+
+      return res.json({
+        success: true,
+        visitor: {
+          ...(latestProfile || {
+            ...targetProfile,
+            full_name: nextFullName,
+            username: nextUsername,
+            updated_at: nowIso,
+          }),
+          email: authTargetUser?.email ?? targetProfile.email,
+        },
+        message: `Data pengunjung "${nextFullName}" berhasil diperbarui.`,
+      });
+    } catch (err: any) {
+      return res.status(500).json({
+        error: err?.message || 'Terjadi kesalahan server saat memperbarui data pengunjung.',
+      });
+    }
+  };
+
+  app.post('/api/admin/visitors', handleCreateVisitorRequest);
+  app.patch('/api/admin/visitors/:id', handleUpdateVisitorRequest);
+  app.put('/api/admin/visitors/:id', handleUpdateVisitorRequest);
+  app.post('/api/admin/visitors/:id/delete', handleDeleteVisitorRequest);
+  app.post('/api/admin/visitors/:id/archive', handleArchiveVisitorRequest);
+  app.post('/api/admin/visitors/:id/restore', handleRestoreVisitorRequest);
+  app.delete('/api/admin/visitors/:id', handleDeleteVisitorRequest);
+  app.post('/api/admin/visitors/:id', async (req: Request, res: Response) => {
+    const action = typeof req.body?.action === 'string' ? req.body.action.trim().toLowerCase() : '';
+    if (action === 'archive') {
+      return handleArchiveVisitorRequest(req, res);
+    }
+    if (action === 'restore') {
+      return handleRestoreVisitorRequest(req, res);
+    }
+    if (action === 'update' || action === 'edit') {
+      return handleUpdateVisitorRequest(req, res);
+    }
+    if (!action || action === 'delete') {
+      return handleDeleteVisitorRequest(req, res);
+    }
+    return res.status(400).json({
+      error: `Aksi "${action}" tidak dikenali untuk endpoint pengunjung.`,
+      code: 'INVALID_VISITOR_ACTION',
+    });
+  });
+
+  // Helper untuk membaca kategori secara best-effort tanpa menggagalkan query buku/peminjaman
+  const loadCategoryMapSafe = async (supabaseAdmin: SupabaseClient) => {
+    const map = new Map<string, { id: string; name: string; slug?: string }>();
+    try {
+      const { data: catRows, error: catErr } = await supabaseAdmin
+        .from('categories')
+        .select('id, name, slug');
+      if (!catErr && Array.isArray(catRows)) {
+        for (const cat of catRows) {
+          if (cat?.id) map.set(cat.id, cat);
+        }
+      }
+    } catch {
+      // Abaikan jika izin service_role pada categories belum aktif
+    }
+    return map;
+  };
+
+  // Endpoint daftar buku terverifikasi via SUPABASE_SERVICE_ROLE_KEY (menghindari 42501 RLS subquery browser)
+  app.get('/api/books', async (req: Request, res: Response) => {
+    try {
+      const { client: supabaseAuth, error: authClientError } = getAuthClient();
+      const { client: supabaseAdmin, error: adminClientError } = getAdminClient();
+      if (!supabaseAuth || !supabaseAdmin) {
+        return res.status(500).json({
+          error: adminClientError || authClientError || 'Konfigurasi server belum lengkap.',
+        });
+      }
+
+      const authCheck = await verifyAuthenticatedUser(
+        req,
+        supabaseAuth,
+        supabaseAdmin,
+        'memuat katalog buku'
+      );
+      if (!authCheck.ok) {
+        return res.status(authCheck.status).json({ error: authCheck.error });
+      }
+
+      const actor = authCheck.userProfile;
+      const isActorAdmin = isAdminOrSuperAdminRole(actor.role) || actor.is_super_admin === true;
+
+      let query = supabaseAdmin
+        .from('books')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+      if (!isActorAdmin) {
+        query = query.eq('is_published', true).eq('is_archived', false);
+      }
+
+      const { data: bookRows, error: booksErr } = await query;
+      if (booksErr) {
+        const permDenied = isDbPermissionDeniedError(booksErr);
+        return res.status(500).json({
+          error: `Gagal memuat daftar buku: ${booksErr.message}`,
+          code: permDenied ? 'DB_PERMISSION_DENIED' : booksErr.code || 'BOOKS_FETCH_FAILED',
+        });
+      }
+
+      const catMap = await loadCategoryMapSafe(supabaseAdmin);
+      const enrichedBooks = (bookRows || []).map((b: any) => {
+        const cat = b.category_id ? catMap.get(b.category_id) : undefined;
+        return {
+          ...b,
+          ...(cat ? { category: cat, category_name: cat.name } : {}),
+        };
+      });
+
+      return res.json({ books: enrichedBooks });
+    } catch (err: any) {
+      return res.status(500).json({
+        error: err?.message || 'Terjadi kesalahan server saat memuat katalog buku.',
+      });
+    }
+  });
+
+  // Endpoint tambah buku oleh Admin/Super Admin via SUPABASE_SERVICE_ROLE_KEY
+  app.post('/api/admin/books', async (req: Request, res: Response) => {
+    try {
+      const { client: supabaseAuth, error: authClientError } = getAuthClient();
+      const { client: supabaseAdmin, error: adminClientError } = getAdminClient();
+      if (!supabaseAuth || !supabaseAdmin) {
+        return res.status(500).json({
+          error: adminClientError || authClientError || 'Konfigurasi server belum lengkap.',
+        });
+      }
+
+      const authCheck = await verifyAdminRequest(req, supabaseAuth, supabaseAdmin);
+      if (!authCheck.ok) {
+        return res.status(authCheck.status).json({ error: authCheck.error });
+      }
+
+      const body = (req.body || {}) as Record<string, any>;
+      const cleanTitle = String(body.title || '').trim();
+      const cleanCategoryId = String(body.category_id || '').trim();
+      if (cleanTitle.length < 2) {
+        return res.status(400).json({ error: 'Judul buku wajib diisi minimal 2 karakter.' });
+      }
+      if (!cleanCategoryId) {
+        return res.status(400).json({
+          error: 'Kategori buku wajib dipilih sebelum menyimpan data buku.',
+        });
+      }
+
+      const totalCopies = Math.max(
+        1,
+        Math.floor(Number(body.total_copies || body.stock || 1) || 1)
+      );
+      const rawAvailable =
+        body.available_copies !== undefined ? Number(body.available_copies) : totalCopies;
+      const availableCopies = Math.max(
+        0,
+        Math.min(totalCopies, Number.isFinite(rawAvailable) ? Math.floor(rawAvailable) : totalCopies)
+      );
+      const nowIso = new Date().toISOString();
+
+      const { data: insertedRows, error: insertErr } = await supabaseAdmin
+        .from('books')
+        .insert({
+          title: cleanTitle,
+          author: String(body.author || 'Penulis Mandiri').trim(),
+          publisher: String(body.publisher || 'Penerbit Mandiri').trim(),
+          publication_year: Number(body.publication_year || body.year || new Date().getFullYear()),
+          isbn: String(body.isbn || 'ISBN-978-000-000').trim(),
+          category_id: cleanCategoryId,
+          description: body.description ? String(body.description).trim() : null,
+          cover_path: body.cover_path || body.coverUrl || null,
+          file_path: body.file_path || null,
+          file_type: body.file_type || null,
+          total_copies: totalCopies,
+          available_copies: availableCopies,
+          is_published: body.is_published !== undefined ? Boolean(body.is_published) : true,
+          is_archived: false,
+          created_by: authCheck.adminProfile.id,
+          created_at: nowIso,
+          updated_at: nowIso,
+        })
+        .select('*');
+
+      if (insertErr) {
+        const permDenied = isDbPermissionDeniedError(insertErr);
+        return res.status(500).json({
+          error: `Gagal menyimpan buku baru: ${insertErr.message}`,
+          code: permDenied ? 'DB_PERMISSION_DENIED' : insertErr.code || 'BOOK_INSERT_FAILED',
+        });
+      }
+
+      const book = insertedRows?.[0];
+      if (!book) {
+        return res.status(500).json({ error: 'Buku gagal ditambahkan ke database.' });
+      }
+
+      try {
+        await supabaseAdmin.from('activity_logs').insert({
+          actor_id: authCheck.adminProfile.id,
+          action: 'create_book',
+          entity_type: 'books',
+          entity_id: book.id,
+          details: JSON.stringify({ title: cleanTitle }),
+          created_at: nowIso,
+        });
+      } catch {
+        // Non-kritikal
+      }
+
+      const catMap = await loadCategoryMapSafe(supabaseAdmin);
+      const cat = book.category_id ? catMap.get(book.category_id) : undefined;
+      return res.status(201).json({
+        success: true,
+        book: {
+          ...book,
+          ...(cat ? { category: cat, category_name: cat.name } : {}),
+        },
+      });
+    } catch (err: any) {
+      return res.status(500).json({
+        error: err?.message || 'Terjadi kesalahan server saat menambahkan buku.',
+      });
+    }
+  });
+
+  // Endpoint perbarui / arsipkan buku oleh Admin/Super Admin via SUPABASE_SERVICE_ROLE_KEY
+  app.patch('/api/admin/books/:id', async (req: Request, res: Response) => {
+    try {
+      const bookId = String(req.params.id || '').trim();
+      if (!isValidUuid(bookId)) {
+        return res.status(400).json({ error: 'ID buku tidak valid.' });
+      }
+
+      const { client: supabaseAuth, error: authClientError } = getAuthClient();
+      const { client: supabaseAdmin, error: adminClientError } = getAdminClient();
+      if (!supabaseAuth || !supabaseAdmin) {
+        return res.status(500).json({
+          error: adminClientError || authClientError || 'Konfigurasi server belum lengkap.',
+        });
+      }
+
+      const authCheck = await verifyAdminRequest(req, supabaseAuth, supabaseAdmin);
+      if (!authCheck.ok) {
+        return res.status(authCheck.status).json({ error: authCheck.error });
+      }
+
+      const rawUpdates = ((req.body || {}) as Record<string, any>) || {};
+      const { category: _c, category_name: _cn, id: _id, created_at: _ca, created_by: _cb, ...cleanUpdates } = rawUpdates;
+      cleanUpdates.updated_at = new Date().toISOString();
+
+      const { data: updatedRows, error: updateErr } = await supabaseAdmin
+        .from('books')
+        .update(cleanUpdates)
+        .eq('id', bookId)
+        .select('*');
+
+      if (updateErr) {
+        const permDenied = isDbPermissionDeniedError(updateErr);
+        return res.status(500).json({
+          error: `Gagal memperbarui buku: ${updateErr.message}`,
+          code: permDenied ? 'DB_PERMISSION_DENIED' : updateErr.code || 'BOOK_UPDATE_FAILED',
+        });
+      }
+
+      const book = updatedRows?.[0];
+      if (!book) {
+        return res.status(404).json({ error: 'Data buku tidak ditemukan.' });
+      }
+
+      try {
+        await supabaseAdmin.from('activity_logs').insert({
+          actor_id: authCheck.adminProfile.id,
+          action: 'update_book',
+          entity_type: 'books',
+          entity_id: bookId,
+          details: JSON.stringify({ title: book.title }),
+          created_at: cleanUpdates.updated_at,
+        });
+      } catch {
+        // Non-kritikal
+      }
+
+      const catMap = await loadCategoryMapSafe(supabaseAdmin);
+      const cat = book.category_id ? catMap.get(book.category_id) : undefined;
+      return res.json({
+        success: true,
+        book: {
+          ...book,
+          ...(cat ? { category: cat, category_name: cat.name } : {}),
+        },
+      });
+    } catch (err: any) {
+      return res.status(500).json({
+        error: err?.message || 'Terjadi kesalahan server saat memperbarui buku.',
+      });
+    }
+  });
+
+  // Endpoint hapus buku oleh Admin/Super Admin via SUPABASE_SERVICE_ROLE_KEY
+  app.delete('/api/admin/books/:id', async (req: Request, res: Response) => {
+    try {
+      const bookId = String(req.params.id || '').trim();
+      if (!isValidUuid(bookId)) {
+        return res.status(400).json({ error: 'ID buku tidak valid.' });
+      }
+
+      const { client: supabaseAuth, error: authClientError } = getAuthClient();
+      const { client: supabaseAdmin, error: adminClientError } = getAdminClient();
+      if (!supabaseAuth || !supabaseAdmin) {
+        return res.status(500).json({
+          error: adminClientError || authClientError || 'Konfigurasi server belum lengkap.',
+        });
+      }
+
+      const authCheck = await verifyAdminRequest(req, supabaseAuth, supabaseAdmin);
+      if (!authCheck.ok) {
+        return res.status(authCheck.status).json({ error: authCheck.error });
+      }
+
+      const { data: activeLoans, error: loansErr } = await supabaseAdmin
+        .from('loans')
+        .select('id')
+        .eq('book_id', bookId)
+        .in('status', ['pending', 'approved', 'borrowed'])
+        .limit(1);
+
+      if (loansErr) {
+        const permDenied = isDbPermissionDeniedError(loansErr);
+        return res.status(500).json({
+          error: `Gagal memeriksa status peminjaman buku: ${loansErr.message}`,
+          code: permDenied ? 'DB_PERMISSION_DENIED' : loansErr.code || 'LOANS_CHECK_FAILED',
+        });
+      }
+
+      if (activeLoans && activeLoans.length > 0) {
+        return res.status(409).json({
+          error: 'Buku ini tidak dapat dihapus karena masih memiliki transaksi peminjaman aktif.',
+          code: 'BOOK_HAS_ACTIVE_LOANS',
+        });
+      }
+
+      const { error: deleteErr } = await supabaseAdmin.from('books').delete().eq('id', bookId);
+      if (deleteErr) {
+        const permDenied = isDbPermissionDeniedError(deleteErr);
+        return res.status(500).json({
+          error: `Gagal menghapus buku: ${deleteErr.message}`,
+          code: permDenied ? 'DB_PERMISSION_DENIED' : deleteErr.code || 'BOOK_DELETE_FAILED',
+        });
+      }
+
+      try {
+        await supabaseAdmin.from('activity_logs').insert({
+          actor_id: authCheck.adminProfile.id,
+          action: 'delete_book',
+          entity_type: 'books',
+          entity_id: bookId,
+          created_at: new Date().toISOString(),
+        });
+      } catch {
+        // Non-kritikal
+      }
+
+      return res.json({ success: true });
+    } catch (err: any) {
+      return res.status(500).json({
+        error: err?.message || 'Terjadi kesalahan server saat menghapus buku.',
+      });
+    }
+  });
+
+  // Endpoint log aktivitas sistem untuk Admin via SUPABASE_SERVICE_ROLE_KEY
+  app.get('/api/admin/activity-logs', async (req: Request, res: Response) => {
+    try {
+      const { client: supabaseAuth, error: authClientError } = getAuthClient();
+      const { client: supabaseAdmin, error: adminClientError } = getAdminClient();
+      if (!supabaseAuth || !supabaseAdmin) {
+        return res.status(500).json({
+          error: adminClientError || authClientError || 'Konfigurasi server belum lengkap.',
+        });
+      }
+
+      const authCheck = await verifyAdminRequest(req, supabaseAuth, supabaseAdmin);
+      if (!authCheck.ok) {
+        return res.status(authCheck.status).json({ error: authCheck.error });
+      }
+
+      const rawLimit = Number(req.query.limit ?? 25);
+      const safeLimit = Math.max(1, Math.min(100, Number.isFinite(rawLimit) ? Math.floor(rawLimit) : 25));
+
+      const { data: logs, error: logsErr } = await supabaseAdmin
+        .from('activity_logs')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(safeLimit);
+
+      if (logsErr) {
+        const permDenied = isDbPermissionDeniedError(logsErr);
+        return res.status(500).json({
+          error: `Gagal memuat log aktivitas: ${logsErr.message}`,
+          code: permDenied ? 'DB_PERMISSION_DENIED' : logsErr.code || 'ACTIVITY_LOGS_FETCH_FAILED',
+        });
+      }
+
+      return res.json({ logs: logs || [] });
+    } catch (err: any) {
+      return res.status(500).json({
+        error: err?.message || 'Terjadi kesalahan server saat memuat log aktivitas.',
+      });
+    }
+  });
+
+  // Helper untuk melengkapi data transaksi peminjaman dengan data buku & profil peminjam
+  const enrichLoanRows = async (supabaseAdmin: SupabaseClient, loanRows: any[]) => {
+    if (!Array.isArray(loanRows) || loanRows.length === 0) return [];
+    const bookIds = Array.from(new Set(loanRows.map((l) => l.book_id).filter(Boolean)));
+    const userIds = Array.from(new Set(loanRows.map((l) => l.user_id).filter(Boolean)));
+
+    const [booksRes, profilesRes, catMap] = await Promise.all([
+      bookIds.length > 0
+        ? supabaseAdmin
+            .from('books')
+            .select(
+              'id, title, author, publisher, publication_year, cover_path, file_path, file_type, available_copies, total_copies, category_id'
+            )
+            .in('id', bookIds)
+        : Promise.resolve({ data: [] as any[], error: null }),
+      userIds.length > 0
+        ? supabaseAdmin
+            .from('profiles')
+            .select('id, full_name, username, role')
+            .in('id', userIds)
+        : Promise.resolve({ data: [] as any[], error: null }),
+      loadCategoryMapSafe(supabaseAdmin),
+    ]);
+
+    const bookMap = new Map<string, any>();
+    for (const b of booksRes.data || []) {
+      const cat = b.category_id ? catMap.get(b.category_id) : undefined;
+      bookMap.set(b.id, {
+        ...b,
+        ...(cat ? { category: cat, category_name: cat.name } : {}),
+      });
+    }
+
+    const profileMap = new Map<string, any>();
+    for (const p of profilesRes.data || []) {
+      profileMap.set(p.id, p);
+    }
+
+    return loanRows.map((loan) => ({
+      ...loan,
+      book: bookMap.get(loan.book_id) ?? undefined,
+      profile: profileMap.get(loan.user_id) ?? undefined,
+    }));
+  };
+
+  // Endpoint daftar peminjaman terverifikasi (Admin melihat semua; Pengunjung hanya melihat miliknya)
+  app.get('/api/loans', async (req: Request, res: Response) => {
+    try {
+      const { client: supabaseAuth, error: authClientError } = getAuthClient();
+      const { client: supabaseAdmin, error: adminClientError } = getAdminClient();
+      if (!supabaseAuth || !supabaseAdmin) {
+        return res.status(500).json({
+          error: adminClientError || authClientError || 'Konfigurasi server belum lengkap.',
+        });
+      }
+
+      const authCheck = await verifyAuthenticatedUser(
+        req,
+        supabaseAuth,
+        supabaseAdmin,
+        'memuat daftar peminjaman'
+      );
+      if (!authCheck.ok) {
+        return res.status(authCheck.status).json({ error: authCheck.error });
+      }
+
+      const actor = authCheck.userProfile;
+      const isActorAdmin = isAdminOrSuperAdminRole(actor.role) || actor.is_super_admin === true;
+
+      let query = supabaseAdmin
+        .from('loans')
+        .select(
+          'id, user_id, book_id, status, requested_at, approved_at, due_at, returned_at, admin_note, created_at, updated_at'
+        )
+        .order('requested_at', { ascending: false });
+
+      if (!isActorAdmin) {
+        query = query.eq('user_id', actor.id);
+      }
+
+      const { data: loanRows, error: loansErr } = await query;
+      if (loansErr) {
+        const isPermDenied = isDbPermissionDeniedError(loansErr);
+        if (isPermDenied) {
+          console.error('[LOANS_LIST_PERMISSION_DENIED]', {
+            actorId: actor.id,
+            code: loansErr.code,
+            message: loansErr.message,
+          });
+          return res.status(500).json({
+            error:
+              'Izin database server untuk membaca tabel peminjaman (loans) belum aktif (kode 42501). Pastikan migrasi GRANT service_role pada public.loans dan SUPABASE_SERVICE_ROLE_KEY sudah terpasang.',
+            code: 'DB_PERMISSION_DENIED',
+          });
+        }
+        return res.status(500).json({
+          error: `Gagal memuat data peminjaman: ${loansErr.message}`,
+          code: loansErr.code || 'LOANS_FETCH_FAILED',
+        });
+      }
+
+      const enriched = await enrichLoanRows(supabaseAdmin, loanRows || []);
+      return res.json({ loans: enriched });
+    } catch (err: any) {
+      return res.status(500).json({
+        error: err?.message || 'Terjadi kesalahan server saat memuat daftar peminjaman.',
+      });
+    }
+  });
+
+  // Endpoint pengajuan peminjaman buku oleh pengunjung/anggota terautentikasi (tanpa durasi hari)
+  app.post('/api/loans', async (req: Request, res: Response) => {
+    try {
+      const { client: supabaseAuth, error: authClientError } = getAuthClient();
+      const { client: supabaseAdmin, error: adminClientError } = getAdminClient();
+      if (!supabaseAuth || !supabaseAdmin) {
+        return res.status(500).json({
+          error: adminClientError || authClientError || 'Konfigurasi server belum lengkap.',
+        });
+      }
+
+      const authCheck = await verifyAuthenticatedUser(
+        req,
+        supabaseAuth,
+        supabaseAdmin,
+        'mengajukan peminjaman buku'
+      );
+      if (!authCheck.ok) {
+        return res.status(authCheck.status).json({ error: authCheck.error });
+      }
+
+      const actor = authCheck.userProfile;
+      const body = (req.body || {}) as Record<string, unknown>;
+      const bookId = typeof body.bookId === 'string' ? body.bookId.trim() : '';
+      if (!isValidUuid(bookId)) {
+        return res.status(400).json({
+          error: 'ID buku yang dipilih tidak valid.',
+          code: 'INVALID_BOOK_ID',
+        });
+      }
+
+      const { data: bookRows, error: bookErr } = await supabaseAdmin
+        .from('books')
+        .select(
+          'id, title, author, publisher, publication_year, cover_path, file_path, file_type, available_copies, total_copies, is_published, is_archived, category_id'
+        )
+        .eq('id', bookId)
+        .limit(2);
+
+      if (bookErr) {
+        const permDenied = isDbPermissionDeniedError(bookErr);
+        return res.status(500).json({
+          error: `Gagal memeriksa data buku: ${bookErr.message}`,
+          code: permDenied ? 'DB_PERMISSION_DENIED' : bookErr.code || 'BOOK_FETCH_FAILED',
+        });
+      }
+
+      const book = bookRows?.[0];
+      if (!book) {
+        return res.status(404).json({
+          error: 'Buku tidak ditemukan.',
+          code: 'BOOK_NOT_FOUND',
+        });
+      }
+
+      if (book.is_published === false || book.is_archived) {
+        return res.status(409).json({
+          error: 'Maaf, buku ini sedang diarsipkan atau belum dipublikasikan untuk dipinjam.',
+          code: 'BOOK_UNAVAILABLE',
+        });
+      }
+
+      if (Number(book.available_copies ?? 0) <= 0) {
+        return res.status(409).json({
+          error: 'Maaf, eksemplar buku ini sedang tidak tersedia.',
+          code: 'BOOK_OUT_OF_STOCK',
+        });
+      }
+
+      const { data: existingLoans, error: existingErr } = await supabaseAdmin
+        .from('loans')
+        .select('id, status')
+        .eq('user_id', actor.id)
+        .eq('book_id', bookId)
+        .in('status', ['pending', 'approved', 'borrowed'])
+        .limit(1);
+
+      if (existingErr) {
+        const isPermDenied = isDbPermissionDeniedError(existingErr);
+        return res.status(500).json({
+          error: isPermDenied
+            ? 'Izin database server untuk memeriksa tabel peminjaman (loans) belum aktif (kode 42501).'
+            : `Gagal memeriksa status peminjaman sebelumnya: ${existingErr.message}`,
+          code: isPermDenied ? 'DB_PERMISSION_DENIED' : existingErr.code || 'LOAN_CHECK_FAILED',
+        });
+      }
+
+      if (existingLoans && existingLoans.length > 0) {
+        return res.status(409).json({
+          error: 'Anda sudah memiliki permintaan atau peminjaman aktif untuk buku ini.',
+          code: 'DUPLICATE_ACTIVE_LOAN',
+        });
+      }
+
+      const requestedAt = new Date().toISOString();
+      const rawNotes = typeof body.notes === 'string' ? body.notes.trim() : '';
+      const cleanNote = rawNotes ? `Catatan peminjam: ${rawNotes.slice(0, 450)}` : null;
+
+      const { data: insertedRows, error: insertErr } = await supabaseAdmin
+        .from('loans')
+        .insert({
+          user_id: actor.id,
+          book_id: bookId,
+          status: 'pending',
+          requested_at: requestedAt,
+          approved_at: null,
+          due_at: null,
+          returned_at: null,
+          admin_note: cleanNote,
+        })
+        .select(
+          'id, user_id, book_id, status, requested_at, approved_at, due_at, returned_at, admin_note, created_at, updated_at'
+        );
+
+      if (insertErr) {
+        const isPermDenied = isDbPermissionDeniedError(insertErr);
+        return res.status(500).json({
+          error: isPermDenied
+            ? 'Izin database server untuk membuat pengajuan peminjaman (loans) belum aktif (kode 42501).'
+            : `Gagal mengajukan peminjaman: ${insertErr.message}`,
+          code: isPermDenied ? 'DB_PERMISSION_DENIED' : insertErr.code || 'LOAN_INSERT_FAILED',
+        });
+      }
+
+      const createdLoan = insertedRows?.[0];
+      if (!createdLoan) {
+        return res.status(500).json({
+          error: 'Pengajuan peminjaman gagal dikonfirmasi oleh database.',
+          code: 'LOAN_INSERT_EMPTY',
+        });
+      }
+
+      try {
+        await supabaseAdmin.from('activity_logs').insert({
+          actor_id: actor.id,
+          action: 'request_loan',
+          entity_type: 'loans',
+          entity_id: createdLoan.id,
+          details: JSON.stringify({ book_title: book.title }),
+          created_at: requestedAt,
+        });
+      } catch {
+        // Non-kritikal
+      }
+
+      const [enriched] = await enrichLoanRows(supabaseAdmin, [createdLoan]);
+      return res.status(201).json({
+        success: true,
+        loan: enriched || {
+          ...createdLoan,
+          book,
+          profile: {
+            id: actor.id,
+            full_name: actor.full_name,
+            username: actor.username,
+            role: actor.role,
+          },
+        },
+      });
+    } catch (err: any) {
+      return res.status(500).json({
+        error: err?.message || 'Terjadi kesalahan server saat mengajukan peminjaman buku.',
+        code: 'INTERNAL_LOAN_REQUEST_ERROR',
+      });
+    }
   });
 
   // Endpoint resmi & aman untuk pengembalian buku berdasarkan primary key transaksi (loans.id)
-  // - Tidak pernah menggunakan .single() yang memicu PGRST116 ("Cannot coerce the result to a single JSON object")
-  // - Hanya memperbarui tepat 1 baris transaksi berstatus aktif ('approved' | 'borrowed')
+  // - Memprioritaskan fungsi PostgreSQL atomik `return_loan_atomic` (row locking FOR UPDATE dalam 1 transaksi)
+  // - Jika RPC belum terpasang, menjalankan serialisasi per buku + rollback kompensasi penuh jika update stok gagal
+  // - Tidak pernah menggunakan .single() yang memicu PGRST116
   // - Mengembalikan stok buku tepat 1 kali (mendeteksi trigger database agar tidak terjadi penggandaan stok)
   // - Menjaga keutuhan riwayat peminjaman (tidak pernah menghapus baris loans)
   app.post('/api/loans/:id/return', async (req: Request, res: Response) => {
@@ -1695,56 +3477,7 @@ export function createApp(options: ServerAppOptions = {}) {
       const actor = authCheck.userProfile;
       const isActorAdmin = isAdminOrSuperAdminRole(actor.role) || actor.is_super_admin === true;
 
-      // 1. Ambil tepat 1 transaksi berdasarkan primary key id (tanpa .single())
-      const { data: loanRows, error: fetchLoanError } = await supabaseAdmin
-        .from('loans')
-        .select(
-          'id, user_id, book_id, status, requested_at, approved_at, due_at, returned_at, admin_note, created_at, updated_at'
-        )
-        .eq('id', loanId)
-        .limit(2);
-
-      if (fetchLoanError) {
-        console.error('[RETURN_BOOK_FETCH_ERROR]', {
-          loanId,
-          actorId: actor.id,
-          code: fetchLoanError.code,
-          message: fetchLoanError.message,
-        });
-        return res.status(500).json({
-          error: formatBookReturnErrorMessage(fetchLoanError),
-          code: fetchLoanError.code || 'LOAN_FETCH_FAILED',
-        });
-      }
-
-      if (!loanRows || loanRows.length === 0) {
-        return res.status(404).json({
-          error: 'Data transaksi peminjaman tidak ditemukan.',
-          code: 'LOAN_NOT_FOUND',
-        });
-      }
-
-      if (loanRows.length > 1) {
-        console.error('[RETURN_BOOK_MULTIPLE_RECORDS]', {
-          query: 'loans_select_by_pk',
-          loanId,
-          rowCount: loanRows.length,
-        });
-        return res.status(409).json({
-          error: 'Terdeteksi duplikasi data pada transaksi peminjaman ini. Hubungi administrator.',
-          code: 'DUPLICATE_LOAN_TRANSACTION',
-        });
-      }
-
-      const existingLoan = loanRows[0];
-
-      // 2. Pastikan hanya pemilik transaksi atau Admin aktif yang berhak mengembalikan
-      if (!isActorAdmin && existingLoan.user_id !== actor.id) {
-        return res.status(403).json({
-          error: 'Anda tidak memiliki izin untuk mengembalikan transaksi peminjaman milik anggota lain.',
-          code: 'FORBIDDEN',
-        });
-      }
+      const isPermissionDenied = isDbPermissionDeniedError;
 
       // Helper untuk menyusun objek Loan lengkap beserta data book & profile
       const buildEnrichedLoan = async (loanRow: any) => {
@@ -1785,89 +3518,141 @@ export function createApp(options: ServerAppOptions = {}) {
         };
       };
 
-      // 3. Periksa kelayakan status transaksi (idempoten untuk 'returned', tolak selain active; tidak melarang pengembalian sebelum due_at)
-      const eligibility = evaluateLoanReturnEligibility(existingLoan.status);
-      if (!eligibility.eligible) {
-        if (eligibility.reason === 'already_returned') {
-          const enriched = await buildEnrichedLoan(existingLoan);
-          return res.json({
-            success: true,
-            alreadyReturned: true,
-            stockAdjusted: false,
-            loan: enriched,
-            message: eligibility.message,
+      // 0. Jalur Transaksi Atomik PostgreSQL (return_loan_atomic dengan FOR UPDATE)
+      if (typeof (supabaseAdmin as any).rpc === 'function') {
+        const { data: rpcResult, error: rpcError } = await (supabaseAdmin as any).rpc(
+          'return_loan_atomic',
+          {
+            p_loan_id: loanId,
+            p_actor_id: actor.id,
+            p_is_admin: isActorAdmin,
+          }
+        );
+
+        if (rpcError) {
+          if (!isMissingRpcFunctionError(rpcError, 'return_loan_atomic')) {
+            if (isPermissionDenied(rpcError)) {
+              const envStatus = inspectServerSupabaseEnv();
+              console.error('[RETURN_BOOK_PERMISSION_DENIED]', {
+                loanId,
+                actorId: actor.id,
+                table: 'loans',
+                operation: 'rpc:return_loan_atomic',
+                code: rpcError.code || '42501',
+                message: rpcError.message,
+                keyStatus: envStatus.keyStatus,
+              });
+              return res.status(500).json({
+                error:
+                  'Izin database server untuk memproses pengembalian buku (loans) belum aktif (kode 42501). Pastikan migrasi GRANT & fungsi return_loan_atomic sudah dijalankan.',
+                code: 'DB_PERMISSION_DENIED',
+              });
+            }
+            console.error('[RETURN_BOOK_ATOMIC_RPC_ERROR]', {
+              loanId,
+              actorId: actor.id,
+              code: rpcError.code,
+              message: rpcError.message,
+            });
+            return res.status(500).json({
+              error: formatBookReturnErrorMessage(rpcError),
+              code: rpcError.code || 'ATOMIC_RETURN_FAILED',
+            });
+          }
+        } else if (rpcResult && typeof rpcResult === 'object') {
+          if (rpcResult.ok === false) {
+            return res.status(Number(rpcResult.http_status) || 409).json({
+              error: rpcResult.error || 'Pengembalian buku belum dapat diproses.',
+              code: rpcResult.code || 'RETURN_REJECTED',
+              ...(rpcResult.current_status ? { currentStatus: rpcResult.current_status } : {}),
+            });
+          }
+          if (rpcResult.ok === true && rpcResult.loan) {
+            const enriched = await buildEnrichedLoan(rpcResult.loan);
+            return res.json({
+              success: true,
+              atomicRpc: true,
+              alreadyReturned: Boolean(rpcResult.already_returned),
+              stockAdjusted: Boolean(rpcResult.stock_adjusted),
+              stockSource: rpcResult.stock_source || 'none',
+              loan: enriched,
+              ...(rpcResult.message ? { message: rpcResult.message } : {}),
+            });
+          }
+        }
+      }
+
+      // 1. Baca awal transaksi berdasarkan primary key id untuk menentukan book_id & otorisasi
+      const { data: peekLoanRows, error: peekLoanError } = await supabaseAdmin
+        .from('loans')
+        .select(
+          'id, user_id, book_id, status, requested_at, approved_at, due_at, returned_at, admin_note, created_at, updated_at'
+        )
+        .eq('id', loanId)
+        .limit(2);
+
+      if (peekLoanError) {
+        if (isPermissionDenied(peekLoanError)) {
+          const envStatus = inspectServerSupabaseEnv();
+          console.error('[RETURN_BOOK_PERMISSION_DENIED]', {
+            loanId,
+            actorId: actor.id,
+            table: 'loans',
+            operation: 'select',
+            code: peekLoanError.code,
+            message: peekLoanError.message,
+            keyStatus: envStatus.keyStatus,
+          });
+          return res.status(500).json({
+            error:
+              'Izin database server untuk membaca tabel peminjaman (loans) belum aktif (kode 42501). Pastikan migrasi GRANT service_role pada public.loans dan SUPABASE_SERVICE_ROLE_KEY di Vercel sudah terpasang dengan benar.',
+            code: 'DB_PERMISSION_DENIED',
           });
         }
 
-        return res.status(409).json({
-          error: eligibility.message,
-          code: 'INVALID_LOAN_STATUS',
-          currentStatus: existingLoan.status,
-        });
-      }
-
-      // 4. Catat stok buku SEBELUM update status peminjaman (untuk deteksi trigger DB)
-      const { data: beforeBookRows, error: beforeBookError } = await supabaseAdmin
-        .from('books')
-        .select('id, title, author, cover_path, total_copies, available_copies')
-        .eq('id', existingLoan.book_id)
-        .limit(2);
-
-      if (beforeBookError) {
-        return res.status(500).json({
-          error: `Gagal memeriksa data stok buku: ${beforeBookError.message}`,
-          code: beforeBookError.code || 'BOOK_FETCH_FAILED',
-        });
-      }
-
-      if (beforeBookRows && beforeBookRows.length > 1) {
-        console.error('[RETURN_BOOK_MULTIPLE_RECORDS]', {
-          query: 'beforeBook.books_by_id',
-          loanId,
-          bookId: existingLoan.book_id,
-          rowCount: beforeBookRows.length,
-        });
-        return res.status(409).json({
-          error: 'Terdeteksi duplikasi data buku untuk transaksi ini. Hubungi administrator.',
-          code: 'DUPLICATE_BOOK_RECORD',
-        });
-      }
-
-      const beforeBook = beforeBookRows?.[0] ?? null;
-      const beforeAvailable = Number(beforeBook?.available_copies ?? 0);
-      const totalCopies = Number(beforeBook?.total_copies ?? 0);
-
-      // 5. Update tepat 1 transaksi berdasarkan primary key + syarat status aktif (TANPA .single())
-      const returnedAt = new Date().toISOString();
-      const { data: updatedRows, error: updateLoanError } = await supabaseAdmin
-        .from('loans')
-        .update({
-          status: 'returned',
-          returned_at: returnedAt,
-          updated_at: returnedAt,
-        })
-        .eq('id', loanId)
-        .in('status', ['approved', 'borrowed'])
-        .select(
-          'id, user_id, book_id, status, requested_at, approved_at, due_at, returned_at, admin_note, created_at, updated_at'
-        );
-
-      if (updateLoanError) {
-        console.error('[RETURN_BOOK_UPDATE_ERROR]', {
+        console.error('[RETURN_BOOK_FETCH_ERROR]', {
           loanId,
           actorId: actor.id,
-          code: updateLoanError.code,
-          message: updateLoanError.message,
+          code: peekLoanError.code,
+          message: peekLoanError.message,
         });
         return res.status(500).json({
-          error: formatBookReturnErrorMessage(updateLoanError),
-          code: updateLoanError.code || 'LOAN_UPDATE_FAILED',
+          error: formatBookReturnErrorMessage(peekLoanError),
+          code: peekLoanError.code || 'LOAN_FETCH_FAILED',
         });
       }
 
-      // Tangani kondisi 0 baris terupdate (mis. permintaan paralel baru saja menyelesaikan return)
-      if (!updatedRows || updatedRows.length === 0) {
-        const { data: recheckRows } = await supabaseAdmin
+      if (!peekLoanRows || peekLoanRows.length === 0) {
+        return res.status(404).json({
+          error: 'Data transaksi peminjaman tidak ditemukan.',
+          code: 'LOAN_NOT_FOUND',
+        });
+      }
+
+      if (peekLoanRows.length > 1) {
+        console.error('[RETURN_BOOK_MULTIPLE_RECORDS]', {
+          query: 'loans_select_by_pk',
+          loanId,
+          rowCount: peekLoanRows.length,
+        });
+        return res.status(409).json({
+          error: 'Terdeteksi duplikasi data pada transaksi peminjaman ini. Hubungi administrator.',
+          code: 'DUPLICATE_LOAN_TRANSACTION',
+        });
+      }
+
+      const peekLoan = peekLoanRows[0];
+
+      // 2. Pastikan hanya pemilik transaksi atau Admin aktif yang berhak mengembalikan
+      if (!isActorAdmin && peekLoan.user_id !== actor.id) {
+        return res.status(403).json({
+          error: 'Anda tidak memiliki izin untuk mengembalikan transaksi peminjaman milik anggota lain.',
+          code: 'FORBIDDEN',
+        });
+      }
+
+      return await withBookStockLock(peekLoan.book_id, async () => {
+        const { data: loanRows, error: fetchLoanError } = await supabaseAdmin
           .from('loans')
           .select(
             'id, user_id, book_id, status, requested_at, approved_at, due_at, returned_at, admin_note, created_at, updated_at'
@@ -1875,11 +3660,32 @@ export function createApp(options: ServerAppOptions = {}) {
           .eq('id', loanId)
           .limit(2);
 
-        if (recheckRows && recheckRows.length > 1) {
+        if (fetchLoanError) {
+          if (isPermissionDenied(fetchLoanError)) {
+            return res.status(500).json({
+              error:
+                'Izin database server untuk membaca tabel peminjaman (loans) belum aktif (kode 42501).',
+              code: 'DB_PERMISSION_DENIED',
+            });
+          }
+          return res.status(500).json({
+            error: formatBookReturnErrorMessage(fetchLoanError),
+            code: fetchLoanError.code || 'LOAN_FETCH_FAILED',
+          });
+        }
+
+        if (!loanRows || loanRows.length === 0) {
+          return res.status(404).json({
+            error: 'Data transaksi peminjaman tidak ditemukan.',
+            code: 'LOAN_NOT_FOUND',
+          });
+        }
+
+        if (loanRows.length > 1) {
           console.error('[RETURN_BOOK_MULTIPLE_RECORDS]', {
-            query: 'recheck.loans_by_pk',
+            query: 'loans_select_by_pk',
             loanId,
-            rowCount: recheckRows.length,
+            rowCount: loanRows.length,
           });
           return res.status(409).json({
             error: 'Terdeteksi duplikasi data pada transaksi peminjaman ini. Hubungi administrator.',
@@ -1887,148 +3693,368 @@ export function createApp(options: ServerAppOptions = {}) {
           });
         }
 
-        const latestLoan = recheckRows?.[0];
-        if (latestLoan?.status === 'returned') {
-          const enriched = await buildEnrichedLoan(latestLoan);
-          return res.json({
-            success: true,
-            alreadyReturned: true,
-            stockAdjusted: false,
-            loan: enriched,
-            message: 'Buku untuk transaksi peminjaman ini sudah dikembalikan.',
+        const existingLoan = loanRows[0];
+
+        // 3. Periksa kelayakan status transaksi (idempoten untuk 'returned', tolak selain active; tidak melarang pengembalian sebelum due_at)
+        const eligibility = evaluateLoanReturnEligibility(existingLoan.status);
+        if (!eligibility.eligible) {
+          if (eligibility.reason === 'already_returned') {
+            const enriched = await buildEnrichedLoan(existingLoan);
+            return res.json({
+              success: true,
+              alreadyReturned: true,
+              stockAdjusted: false,
+              loan: enriched,
+              message: eligibility.message,
+            });
+          }
+
+          return res.status(409).json({
+            error: eligibility.message,
+            code: 'INVALID_LOAN_STATUS',
+            currentStatus: existingLoan.status,
           });
         }
 
-        return res.status(409).json({
-          error: 'Status transaksi peminjaman berubah sebelum pengembalian dikonfirmasi. Muat ulang halaman dan coba lagi.',
-          code: 'CONCURRENT_LOAN_MODIFICATION',
-        });
-      }
-
-      if (updatedRows.length > 1) {
-        console.error('[RETURN_BOOK_MULTIPLE_RECORDS]', {
-          query: 'loans_update_by_pk',
-          loanId,
-          rowCount: updatedRows.length,
-        });
-        return res.status(409).json({
-          error: 'Terdeteksi lebih dari satu baris transaksi saat pembaruan pengembalian. Hubungi administrator.',
-          code: 'DUPLICATE_LOAN_TRANSACTION',
-        });
-      }
-
-      const updatedLoan = updatedRows[0];
-
-      // 6. Rekonsiliasi stok buku: pastikan available_copies bertambah tepat +1 dan tidak tergandakan oleh trigger
-      let stockAdjusted = false;
-      let stockSource: 'trigger' | 'application' | 'capped_at_total' | 'none' = 'none';
-
-      if (beforeBook) {
-        const { data: afterBookRows, error: afterBookErr } = await supabaseAdmin
+        // 4. Catat stok buku SEBELUM update status peminjaman (untuk deteksi trigger DB)
+        const { data: beforeBookRows, error: beforeBookError } = await supabaseAdmin
           .from('books')
-          .select('id, available_copies, total_copies')
+          .select('id, title, author, cover_path, total_copies, available_copies')
           .eq('id', existingLoan.book_id)
           .limit(2);
 
-        if (afterBookErr) {
-          console.error('[RETURN_BOOK_AFTER_BOOK_FETCH_ERROR]', {
-            loanId,
-            bookId: existingLoan.book_id,
-            code: afterBookErr.code,
-            message: afterBookErr.message,
+        if (beforeBookError) {
+          if (isPermissionDenied(beforeBookError)) {
+            const envStatus = inspectServerSupabaseEnv();
+            console.error('[RETURN_BOOK_PERMISSION_DENIED]', {
+              loanId,
+              actorId: actor.id,
+              table: 'books',
+              operation: 'select',
+              code: beforeBookError.code,
+              message: beforeBookError.message,
+              keyStatus: envStatus.keyStatus,
+            });
+            return res.status(500).json({
+              error:
+                'Izin database server untuk membaca tabel buku (books) belum aktif (kode 42501). Pastikan migrasi GRANT service_role pada public.books sudah dijalankan.',
+              code: 'DB_PERMISSION_DENIED',
+            });
+          }
+          return res.status(500).json({
+            error: `Gagal memeriksa data stok buku: ${beforeBookError.message}`,
+            code: beforeBookError.code || 'BOOK_FETCH_FAILED',
           });
         }
 
-        if (afterBookRows && afterBookRows.length > 1) {
+        if (beforeBookRows && beforeBookRows.length > 1) {
           console.error('[RETURN_BOOK_MULTIPLE_RECORDS]', {
-            query: 'afterBook.books_by_id',
+            query: 'beforeBook.books_by_id',
             loanId,
             bookId: existingLoan.book_id,
-            rowCount: afterBookRows.length,
+            rowCount: beforeBookRows.length,
           });
           return res.status(409).json({
-            error: 'Terdeteksi duplikasi data buku saat sinkronisasi stok. Hubungi administrator.',
+            error: 'Terdeteksi duplikasi data buku untuk transaksi ini. Hubungi administrator.',
             code: 'DUPLICATE_BOOK_RECORD',
           });
         }
 
-        const afterBook = afterBookRows?.[0] ?? beforeBook;
-        const stockPlan = computeBookStockAfterReturn({
-          beforeAvailable,
-          afterAvailable: Number(afterBook.available_copies ?? beforeAvailable),
-          totalCopies: Number(afterBook.total_copies ?? totalCopies),
-        });
-        stockSource = stockPlan.incrementedBy;
+        const beforeBook = beforeBookRows?.[0] ?? null;
+        const beforeAvailable = Number(beforeBook?.available_copies ?? 0);
+        const totalCopies = Number(beforeBook?.total_copies ?? 0);
+        const previousLoanStatus = String(existingLoan.status || 'approved');
+        const previousReturnedAt = existingLoan.returned_at ?? null;
 
-        if (stockPlan.needsUpdate) {
-          const { data: updatedBookRows, error: stockUpdateErr } = await supabaseAdmin
-            .from('books')
-            .update({
-              available_copies: stockPlan.targetAvailable,
-              updated_at: returnedAt,
-            })
-            .eq('id', existingLoan.book_id)
-            .eq('available_copies', stockPlan.safeAfter)
-            .select('id, available_copies');
+        // 5. Update tepat 1 transaksi berdasarkan primary key + syarat status aktif (TANPA .single())
+        const returnedAt = new Date().toISOString();
+        const { data: updatedRows, error: updateLoanError } = await supabaseAdmin
+          .from('loans')
+          .update({
+            status: 'returned',
+            returned_at: returnedAt,
+            updated_at: returnedAt,
+          })
+          .eq('id', loanId)
+          .in('status', ['approved', 'borrowed'])
+          .select(
+            'id, user_id, book_id, status, requested_at, approved_at, due_at, returned_at, admin_note, created_at, updated_at'
+          );
 
-          if (stockUpdateErr) {
-            console.error('[RETURN_BOOK_STOCK_SYNC_ERROR]', {
+        if (updateLoanError) {
+          if (isPermissionDenied(updateLoanError)) {
+            const envStatus = inspectServerSupabaseEnv();
+            console.error('[RETURN_BOOK_PERMISSION_DENIED]', {
+              loanId,
+              actorId: actor.id,
+              table: 'loans',
+              operation: 'update',
+              code: updateLoanError.code,
+              message: updateLoanError.message,
+              keyStatus: envStatus.keyStatus,
+            });
+            return res.status(500).json({
+              error:
+                'Izin database server untuk memperbarui tabel peminjaman (loans) belum aktif (kode 42501). Pastikan migrasi GRANT service_role pada public.loans dan SUPABASE_SERVICE_ROLE_KEY di Vercel sudah terpasang dengan benar.',
+              code: 'DB_PERMISSION_DENIED',
+            });
+          }
+
+          console.error('[RETURN_BOOK_UPDATE_ERROR]', {
+            loanId,
+            actorId: actor.id,
+            code: updateLoanError.code,
+            message: updateLoanError.message,
+          });
+          return res.status(500).json({
+            error: formatBookReturnErrorMessage(updateLoanError),
+            code: updateLoanError.code || 'LOAN_UPDATE_FAILED',
+          });
+        }
+
+        // Tangani kondisi 0 baris terupdate (mis. permintaan paralel baru saja menyelesaikan return)
+        if (!updatedRows || updatedRows.length === 0) {
+          const { data: recheckRows } = await supabaseAdmin
+            .from('loans')
+            .select(
+              'id, user_id, book_id, status, requested_at, approved_at, due_at, returned_at, admin_note, created_at, updated_at'
+            )
+            .eq('id', loanId)
+            .limit(2);
+
+          if (recheckRows && recheckRows.length > 1) {
+            console.error('[RETURN_BOOK_MULTIPLE_RECORDS]', {
+              query: 'recheck.loans_by_pk',
+              loanId,
+              rowCount: recheckRows.length,
+            });
+            return res.status(409).json({
+              error: 'Terdeteksi duplikasi data pada transaksi peminjaman ini. Hubungi administrator.',
+              code: 'DUPLICATE_LOAN_TRANSACTION',
+            });
+          }
+
+          const latestLoan = recheckRows?.[0];
+          if (latestLoan?.status === 'returned') {
+            const enriched = await buildEnrichedLoan(latestLoan);
+            return res.json({
+              success: true,
+              alreadyReturned: true,
+              stockAdjusted: false,
+              loan: enriched,
+              message: 'Buku untuk transaksi peminjaman ini sudah dikembalikan.',
+            });
+          }
+
+          return res.status(409).json({
+            error: 'Status transaksi peminjaman berubah sebelum pengembalian dikonfirmasi. Muat ulang halaman dan coba lagi.',
+            code: 'CONCURRENT_LOAN_MODIFICATION',
+          });
+        }
+
+        if (updatedRows.length > 1) {
+          console.error('[RETURN_BOOK_MULTIPLE_RECORDS]', {
+            query: 'loans_update_by_pk',
+            loanId,
+            rowCount: updatedRows.length,
+          });
+          return res.status(409).json({
+            error: 'Terdeteksi lebih dari satu baris transaksi saat pembaruan pengembalian. Hubungi administrator.',
+            code: 'DUPLICATE_LOAN_TRANSACTION',
+          });
+        }
+
+        const updatedLoan = updatedRows[0];
+
+        const rollbackReturnLoanStatus = async () => {
+          try {
+            await supabaseAdmin
+              .from('loans')
+              .update({
+                status: previousLoanStatus,
+                returned_at: previousReturnedAt,
+                updated_at: new Date().toISOString(),
+              })
+              .eq('id', loanId)
+              .eq('status', 'returned');
+          } catch (rollbackErr: any) {
+            console.error('[RETURN_BOOK_ROLLBACK_ERROR]', {
               loanId,
               bookId: existingLoan.book_id,
-              message: stockUpdateErr.message,
+              message: rollbackErr?.message,
             });
-          } else {
-            if (updatedBookRows && updatedBookRows.length > 1) {
+          }
+        };
+
+        // 6. Rekonsiliasi stok buku: pastikan available_copies bertambah tepat +1 atau rollback penuh jika gagal
+        let stockAdjusted = false;
+        let stockSource: 'trigger' | 'application' | 'capped_at_total' | 'none' = 'none';
+
+        if (beforeBook) {
+          const { data: afterBookRows, error: afterBookErr } = await supabaseAdmin
+            .from('books')
+            .select('id, available_copies, total_copies')
+            .eq('id', existingLoan.book_id)
+            .limit(2);
+
+          if (afterBookErr) {
+            console.error('[RETURN_BOOK_AFTER_BOOK_FETCH_ERROR]', {
+              loanId,
+              bookId: existingLoan.book_id,
+              code: afterBookErr.code,
+              message: afterBookErr.message,
+            });
+            await rollbackReturnLoanStatus();
+            return res.status(500).json({
+              error: `Gagal memverifikasi pembaruan stok buku saat pengembalian; transaksi dibatalkan secara otomatis: ${afterBookErr.message}`,
+              code: isPermissionDenied(afterBookErr) ? 'DB_PERMISSION_DENIED' : 'BOOK_STOCK_SYNC_FAILED',
+              rolledBack: true,
+            });
+          }
+
+          if (afterBookRows && afterBookRows.length > 1) {
+            console.error('[RETURN_BOOK_MULTIPLE_RECORDS]', {
+              query: 'afterBook.books_by_id',
+              loanId,
+              bookId: existingLoan.book_id,
+              rowCount: afterBookRows.length,
+            });
+            await rollbackReturnLoanStatus();
+            return res.status(409).json({
+              error: 'Terdeteksi duplikasi data buku saat sinkronisasi stok. Transaksi dibatalkan otomatis.',
+              code: 'DUPLICATE_BOOK_RECORD',
+              rolledBack: true,
+            });
+          }
+
+          const afterBook = afterBookRows?.[0] ?? beforeBook;
+          const afterAvailableNum = Number(afterBook.available_copies ?? beforeAvailable);
+          if (afterAvailableNum - beforeAvailable > 1) {
+            await rollbackReturnLoanStatus();
+            return res.status(500).json({
+              error: 'Terdeteksi penambahan stok lebih dari satu eksemplar untuk satu pengembalian. Transaksi dibatalkan otomatis.',
+              code: 'DOUBLE_STOCK_INCREMENT',
+              rolledBack: true,
+            });
+          }
+
+          const stockPlan = computeBookStockAfterReturn({
+            beforeAvailable,
+            afterAvailable: afterAvailableNum,
+            totalCopies: Number(afterBook.total_copies ?? totalCopies),
+          });
+          stockSource = stockPlan.incrementedBy;
+
+          if (stockPlan.needsUpdate) {
+            const { data: updatedBookRows, error: stockUpdateErr } = await supabaseAdmin
+              .from('books')
+              .update({
+                available_copies: stockPlan.targetAvailable,
+                updated_at: returnedAt,
+              })
+              .eq('id', existingLoan.book_id)
+              .eq('available_copies', stockPlan.safeAfter)
+              .select('id, available_copies');
+
+            if (stockUpdateErr) {
+              await rollbackReturnLoanStatus();
+              if (isPermissionDenied(stockUpdateErr)) {
+                const envStatus = inspectServerSupabaseEnv();
+                console.error('[RETURN_BOOK_PERMISSION_DENIED]', {
+                  loanId,
+                  actorId: actor.id,
+                  table: 'books',
+                  operation: 'update',
+                  code: stockUpdateErr.code,
+                  message: stockUpdateErr.message,
+                  keyStatus: envStatus.keyStatus,
+                });
+                return res.status(500).json({
+                  error:
+                    'Izin database server untuk memperbarui stok buku (books) belum aktif (kode 42501). Perubahan status peminjaman dibatalkan otomatis.',
+                  code: 'DB_PERMISSION_DENIED',
+                  rolledBack: true,
+                });
+              }
+              console.error('[RETURN_BOOK_STOCK_SYNC_ERROR]', {
+                loanId,
+                bookId: existingLoan.book_id,
+                message: stockUpdateErr.message,
+              });
+              return res.status(500).json({
+                error: `Gagal memperbarui stok buku saat pengembalian; transaksi dibatalkan otomatis: ${stockUpdateErr.message}`,
+                code: 'BOOK_STOCK_UPDATE_FAILED',
+                rolledBack: true,
+              });
+            }
+
+            if (!updatedBookRows || updatedBookRows.length === 0) {
+              await rollbackReturnLoanStatus();
+              return res.status(409).json({
+                error: 'Stok buku berubah secara bersamaan sebelum pengembalian selesai. Transaksi dibatalkan otomatis; silakan coba lagi.',
+                code: 'CONCURRENT_BOOK_STOCK_MODIFICATION',
+                rolledBack: true,
+              });
+            }
+
+            if (updatedBookRows.length > 1) {
               console.error('[RETURN_BOOK_MULTIPLE_RECORDS]', {
                 query: 'books_stock_update_by_id',
                 loanId,
                 bookId: existingLoan.book_id,
                 rowCount: updatedBookRows.length,
               });
+              await rollbackReturnLoanStatus();
+              return res.status(409).json({
+                error: 'Terdeteksi lebih dari satu baris buku saat pembaruan stok. Transaksi dibatalkan otomatis.',
+                code: 'DUPLICATE_BOOK_RECORD',
+                rolledBack: true,
+              });
             }
+
             stockAdjusted = stockPlan.incrementedBy === 'application';
+          } else if (stockPlan.incrementedBy === 'trigger') {
+            stockAdjusted = true;
           }
-        } else if (stockPlan.incrementedBy === 'trigger') {
-          stockAdjusted = true;
         }
-      }
 
-      // 7. Catat log aktivitas tanpa menghapus riwayat pinjaman
-      try {
-        await supabaseAdmin.from('activity_logs').insert({
-          actor_id: actor.id,
-          action: 'return_loan',
-          entity_type: 'loans',
-          entity_id: loanId,
-          details: JSON.stringify({
-            book_id: existingLoan.book_id,
-            returned_at: returnedAt,
-            stock_source: stockSource,
-          }),
-          created_at: returnedAt,
+        // 7. Catat log aktivitas tanpa menghapus riwayat pinjaman
+        try {
+          await supabaseAdmin.from('activity_logs').insert({
+            actor_id: actor.id,
+            action: 'return_loan',
+            entity_type: 'loans',
+            entity_id: loanId,
+            details: JSON.stringify({
+              book_id: existingLoan.book_id,
+              returned_at: returnedAt,
+              stock_source: stockSource,
+            }),
+            created_at: returnedAt,
+          });
+        } catch {
+          // Abaikan error logging non-kritikal agar konfirmasi pengembalian tetap sukses
+        }
+
+        console.info('[RETURN_BOOK_QUERY_TRACE]', {
+          loanId,
+          bookId: existingLoan.book_id,
+          previousStatus: existingLoan.status,
+          newStatus: updatedLoan.status,
+          loanRowsMatched: loanRows.length,
+          updatedLoanRows: updatedRows.length,
+          stockSource,
+          stockAdjusted,
         });
-      } catch {
-        // Abaikan error logging non-kritikal agar konfirmasi pengembalian tetap sukses
-      }
 
-      console.info('[RETURN_BOOK_QUERY_TRACE]', {
-        loanId,
-        bookId: existingLoan.book_id,
-        previousStatus: existingLoan.status,
-        newStatus: updatedLoan.status,
-        loanRowsMatched: loanRows.length,
-        updatedLoanRows: updatedRows.length,
-        stockSource,
-        stockAdjusted,
-      });
-
-      const enriched = await buildEnrichedLoan(updatedLoan);
-      return res.json({
-        success: true,
-        alreadyReturned: false,
-        stockAdjusted,
-        stockSource,
-        loan: enriched,
+        const enriched = await buildEnrichedLoan(updatedLoan);
+        return res.json({
+          success: true,
+          alreadyReturned: false,
+          stockAdjusted,
+          stockSource,
+          loan: enriched,
+        });
       });
     } catch (err: any) {
       console.error('[RETURN_BOOK_ENDPOINT_ERROR]', {
@@ -2091,6 +4117,769 @@ export function createApp(options: ServerAppOptions = {}) {
         message: err?.message || 'Gagal mencatat error teknis pengembalian.',
       });
       return res.status(500).json({ logged: false });
+    }
+  });
+
+  // Endpoint persetujuan peminjaman buku oleh Admin/Super Admin via SUPABASE_SERVICE_ROLE_KEY
+  // - Memprioritaskan fungsi PostgreSQL atomik `approve_loan_atomic` (row locking FOR UPDATE pada loans & books)
+  // - Jika RPC belum terpasang, memakai per-book mutex + optimistic lock + rollback kompensasi penuh jika update stok gagal
+  app.post('/api/loans/:id/approve', async (req: Request, res: Response) => {
+    try {
+      const loanId = String(req.params.id || '').trim();
+      if (!isValidUuid(loanId)) {
+        return res.status(400).json({
+          error: 'ID transaksi peminjaman tidak valid.',
+          code: 'INVALID_LOAN_ID',
+        });
+      }
+
+      const { client: supabaseAuth, error: authClientError } = getAuthClient();
+      if (!supabaseAuth) {
+        return res.status(500).json({
+          error: authClientError || 'Konfigurasi autentikasi server belum lengkap.',
+        });
+      }
+
+      const { client: supabaseAdmin, error: adminClientError } = getAdminClient();
+      if (!supabaseAdmin) {
+        return res.status(500).json({
+          error: adminClientError || 'Konfigurasi admin server belum lengkap.',
+        });
+      }
+
+      const authCheck = await verifyAuthenticatedUser(
+        req,
+        supabaseAuth,
+        supabaseAdmin,
+        'menyetujui peminjaman buku'
+      );
+      if (!authCheck.ok) {
+        return res.status(authCheck.status).json({ error: authCheck.error });
+      }
+
+      const actor = authCheck.userProfile;
+      const isActorAdmin = isAdminOrSuperAdminRole(actor.role) || actor.is_super_admin === true;
+      if (!isActorAdmin) {
+        return res.status(403).json({
+          error: 'Hanya administrator aktif yang berwenang menyetujui peminjaman buku.',
+          code: 'FORBIDDEN',
+        });
+      }
+
+      const body = (req.body || {}) as Record<string, unknown>;
+      const adminNote =
+        typeof body.adminNote === 'string' && body.adminNote.trim()
+          ? body.adminNote.trim().slice(0, 500)
+          : 'Peminjaman telah disetujui administrator perpustakaan.';
+
+      // 0. Jalur Transaksi Atomik PostgreSQL (approve_loan_atomic dengan FOR UPDATE)
+      if (typeof (supabaseAdmin as any).rpc === 'function') {
+        const { data: rpcResult, error: rpcError } = await (supabaseAdmin as any).rpc(
+          'approve_loan_atomic',
+          {
+            p_loan_id: loanId,
+            p_actor_id: actor.id,
+            p_admin_note: adminNote,
+          }
+        );
+
+        if (rpcError) {
+          if (!isMissingRpcFunctionError(rpcError, 'approve_loan_atomic')) {
+            const permDenied = isDbPermissionDeniedError(rpcError);
+            if (permDenied) {
+              console.error('[LOAN_APPROVE_PERMISSION_DENIED]', {
+                loanId,
+                actorId: actor.id,
+                table: 'loans',
+                operation: 'rpc:approve_loan_atomic',
+                code: rpcError.code || '42501',
+                keyStatus: inspectServerSupabaseEnv().keyStatus,
+              });
+            }
+            return res.status(500).json({
+              error: permDenied
+                ? 'Izin database server untuk menyetujui peminjaman (approve_loan_atomic) belum aktif (kode 42501).'
+                : `Gagal menyetujui peminjaman: ${rpcError.message}`,
+              code: permDenied ? 'DB_PERMISSION_DENIED' : rpcError.code || 'ATOMIC_APPROVE_FAILED',
+            });
+          }
+        } else if (rpcResult && typeof rpcResult === 'object') {
+          if (rpcResult.ok === false) {
+            return res.status(Number(rpcResult.http_status) || 409).json({
+              error: rpcResult.error || 'Persetujuan peminjaman ditolak.',
+              code: rpcResult.code || 'APPROVE_REJECTED',
+            });
+          }
+          if (rpcResult.ok === true && rpcResult.loan) {
+            const approvedLoanRow = rpcResult.loan;
+            const [{ data: enrichedBookRows }, { data: enrichedProfileRows }] = await Promise.all([
+              supabaseAdmin
+                .from('books')
+                .select('id, title, author, cover_path, file_path, available_copies, total_copies')
+                .eq('id', approvedLoanRow.book_id)
+                .limit(2),
+              supabaseAdmin
+                .from('profiles')
+                .select('id, full_name, username')
+                .eq('id', approvedLoanRow.user_id)
+                .limit(2),
+            ]);
+
+            return res.json({
+              success: true,
+              atomicRpc: true,
+              stockAdjusted: Boolean(rpcResult.stock_adjusted),
+              stockSource: rpcResult.stock_source || 'none',
+              loan: {
+                ...approvedLoanRow,
+                due_at: null,
+                book: enrichedBookRows?.[0] ?? undefined,
+                profile: enrichedProfileRows?.[0] ?? undefined,
+              },
+            });
+          }
+        }
+      }
+
+      // 1. Baca awal transaksi untuk mengetahui book_id sebelum mengunci antrean per buku
+      const { data: peekLoanRows, error: peekLoanError } = await supabaseAdmin
+        .from('loans')
+        .select('id, user_id, book_id, status, admin_note')
+        .eq('id', loanId)
+        .limit(2);
+
+      if (peekLoanError) {
+        const permDenied = isDbPermissionDeniedError(peekLoanError);
+        if (permDenied) {
+          console.error('[LOAN_APPROVE_PERMISSION_DENIED]', {
+            loanId,
+            actorId: actor.id,
+            table: 'loans',
+            operation: 'select',
+            code: peekLoanError.code || '42501',
+            keyStatus: inspectServerSupabaseEnv().keyStatus,
+          });
+        }
+        return res.status(500).json({
+          error: permDenied
+            ? 'Izin database server untuk membaca tabel peminjaman (loans) belum aktif (kode 42501). Pastikan migrasi GRANT service_role pada public.loans dan SUPABASE_SERVICE_ROLE_KEY sudah terpasang.'
+            : `Gagal memeriksa transaksi peminjaman: ${peekLoanError.message}`,
+          code: permDenied ? 'DB_PERMISSION_DENIED' : peekLoanError.code || 'LOAN_FETCH_FAILED',
+        });
+      }
+
+      if (!peekLoanRows || peekLoanRows.length === 0) {
+        return res.status(404).json({
+          error: 'Data transaksi peminjaman tidak ditemukan.',
+          code: 'LOAN_NOT_FOUND',
+        });
+      }
+
+      if (peekLoanRows.length > 1) {
+        return res.status(409).json({
+          error: 'Terdeteksi duplikasi data pada transaksi peminjaman ini.',
+          code: 'DUPLICATE_LOAN_TRANSACTION',
+        });
+      }
+
+      const peekLoan = peekLoanRows[0];
+
+      return await withBookStockLock(peekLoan.book_id, async () => {
+        const { data: loanRows, error: fetchLoanError } = await supabaseAdmin
+          .from('loans')
+          .select('id, user_id, book_id, status, admin_note')
+          .eq('id', loanId)
+          .limit(2);
+
+        if (fetchLoanError) {
+          const permDenied = isDbPermissionDeniedError(fetchLoanError);
+          return res.status(500).json({
+            error: permDenied
+              ? 'Izin database server untuk membaca tabel peminjaman (loans) belum aktif (kode 42501).'
+              : `Gagal memeriksa transaksi peminjaman: ${fetchLoanError.message}`,
+            code: permDenied ? 'DB_PERMISSION_DENIED' : fetchLoanError.code || 'LOAN_FETCH_FAILED',
+          });
+        }
+
+        if (!loanRows || loanRows.length === 0) {
+          return res.status(404).json({
+            error: 'Data transaksi peminjaman tidak ditemukan.',
+            code: 'LOAN_NOT_FOUND',
+          });
+        }
+
+        if (loanRows.length > 1) {
+          return res.status(409).json({
+            error: 'Terdeteksi duplikasi data pada transaksi peminjaman ini.',
+            code: 'DUPLICATE_LOAN_TRANSACTION',
+          });
+        }
+
+        const existingLoan = loanRows[0];
+        if (existingLoan.status !== 'pending') {
+          return res.status(409).json({
+            error: 'Permintaan peminjaman ini sudah diproses sebelumnya dan tidak dapat disetujui ulang.',
+            code: 'INVALID_LOAN_STATUS',
+          });
+        }
+
+        const { data: bookRows, error: bookErr } = await supabaseAdmin
+          .from('books')
+          .select('id, available_copies, total_copies, is_archived')
+          .eq('id', existingLoan.book_id)
+          .limit(2);
+
+        if (bookErr) {
+          const permDenied = isDbPermissionDeniedError(bookErr);
+          if (permDenied) {
+            console.error('[LOAN_APPROVE_PERMISSION_DENIED]', {
+              loanId,
+              actorId: actor.id,
+              table: 'books',
+              operation: 'select',
+              code: bookErr.code || '42501',
+              keyStatus: inspectServerSupabaseEnv().keyStatus,
+            });
+          }
+          return res.status(500).json({
+            error: `Gagal memeriksa stok buku: ${bookErr.message}`,
+            code: permDenied ? 'DB_PERMISSION_DENIED' : bookErr.code || 'BOOK_FETCH_FAILED',
+          });
+        }
+
+        const targetBook = bookRows?.[0];
+        if (!targetBook || targetBook.is_archived || Number(targetBook.available_copies ?? 0) <= 0) {
+          return res.status(409).json({
+            error: 'Stok eksemplar buku sudah habis atau buku diarsipkan sehingga peminjaman tidak dapat disetujui.',
+            code: 'BOOK_UNAVAILABLE',
+          });
+        }
+
+        const beforeAvailableCopies = Number(targetBook.available_copies ?? 0);
+        const totalCopies = Number(targetBook.total_copies ?? beforeAvailableCopies);
+        const previousAdminNote = existingLoan.admin_note ?? null;
+        const nowIso = new Date().toISOString();
+
+        const { data: updatedRows, error: updateError } = await supabaseAdmin
+          .from('loans')
+          .update({
+            status: 'approved',
+            approved_at: nowIso,
+            due_at: null,
+            admin_note: adminNote,
+            updated_at: nowIso,
+          })
+          .eq('id', loanId)
+          .eq('status', 'pending')
+          .select(
+            'id, user_id, book_id, status, requested_at, approved_at, due_at, returned_at, admin_note, created_at, updated_at'
+          );
+
+        if (updateError) {
+          const permDenied = isDbPermissionDeniedError(updateError);
+          if (permDenied) {
+            console.error('[LOAN_APPROVE_PERMISSION_DENIED]', {
+              loanId,
+              actorId: actor.id,
+              table: 'loans',
+              operation: 'update',
+              code: updateError.code || '42501',
+              keyStatus: inspectServerSupabaseEnv().keyStatus,
+            });
+          }
+          return res.status(500).json({
+            error: permDenied
+              ? 'Izin database server untuk menyetujui peminjaman pada tabel loans belum aktif (kode 42501). Pastikan migrasi GRANT service_role pada public.loans sudah dijalankan.'
+              : `Gagal menyetujui peminjaman: ${updateError.message}`,
+            code: permDenied ? 'DB_PERMISSION_DENIED' : updateError.code || 'LOAN_APPROVE_FAILED',
+          });
+        }
+
+        if (!updatedRows || updatedRows.length === 0) {
+          return res.status(409).json({
+            error: 'Permintaan peminjaman ini sudah diproses oleh admin lain.',
+            code: 'CONCURRENT_LOAN_MODIFICATION',
+          });
+        }
+
+        const updatedLoan = updatedRows[0];
+
+        const rollbackApproveLoanStatus = async () => {
+          try {
+            await supabaseAdmin
+              .from('loans')
+              .update({
+                status: 'pending',
+                approved_at: null,
+                due_at: null,
+                admin_note: previousAdminNote,
+                updated_at: new Date().toISOString(),
+              })
+              .eq('id', loanId)
+              .eq('status', 'approved');
+          } catch (rollbackErr: any) {
+            console.error('[LOAN_APPROVE_ROLLBACK_ERROR]', {
+              loanId,
+              bookId: updatedLoan.book_id,
+              message: rollbackErr?.message,
+            });
+          }
+        };
+
+        // Rekonsiliasi stok tersedia saat persetujuan: wajib sukses atau rollback status loan secara penuh
+        let stockAdjusted = false;
+        let stockSource: 'trigger' | 'application' | 'none' = 'none';
+        const { data: afterBookRows, error: afterBookErr } = await supabaseAdmin
+          .from('books')
+          .select('id, available_copies, total_copies')
+          .eq('id', updatedLoan.book_id)
+          .limit(2);
+
+        if (afterBookErr || !afterBookRows?.[0]) {
+          await rollbackApproveLoanStatus();
+          return res.status(500).json({
+            error: 'Gagal memverifikasi stok buku setelah persetujuan. Persetujuan dibatalkan otomatis.',
+            code: isDbPermissionDeniedError(afterBookErr) ? 'DB_PERMISSION_DENIED' : 'BOOK_STOCK_SYNC_FAILED',
+            rolledBack: true,
+          });
+        }
+
+        const afterBook = afterBookRows[0];
+        const rawAfterAvailable = Number(afterBook.available_copies ?? 0);
+        if (rawAfterAvailable < 0 || beforeAvailableCopies - rawAfterAvailable > 1) {
+          await rollbackApproveLoanStatus();
+          return res.status(409).json({
+            error: 'Integritas stok buku tidak terpenuhi (stok negatif / pengurangan ganda). Persetujuan dibatalkan otomatis.',
+            code: 'BOOK_STOCK_INTEGRITY_ERROR',
+            rolledBack: true,
+          });
+        }
+
+        const stockPlan = computeBookStockAfterApprove({
+          beforeAvailable: beforeAvailableCopies,
+          afterAvailable: rawAfterAvailable,
+          totalCopies: Number(afterBook.total_copies ?? totalCopies),
+        });
+        stockSource =
+          stockPlan.decrementedBy === 'trigger'
+            ? 'trigger'
+            : stockPlan.decrementedBy === 'application'
+              ? 'application'
+              : 'none';
+
+        if (stockPlan.needsUpdate) {
+          if (stockPlan.targetAvailable < 0 || stockPlan.safeAfter <= 0) {
+            await rollbackApproveLoanStatus();
+            return res.status(409).json({
+              error: 'Stok eksemplar buku sudah habis sehingga persetujuan dibatalkan otomatis.',
+              code: 'BOOK_UNAVAILABLE',
+              rolledBack: true,
+            });
+          }
+
+          const { data: updatedBookRows, error: stockUpdateErr } = await supabaseAdmin
+            .from('books')
+            .update({
+              available_copies: stockPlan.targetAvailable,
+              updated_at: nowIso,
+            })
+            .eq('id', updatedLoan.book_id)
+            .eq('available_copies', stockPlan.safeAfter)
+            .select('id, available_copies');
+
+          if (stockUpdateErr) {
+            await rollbackApproveLoanStatus();
+            const permDenied = isDbPermissionDeniedError(stockUpdateErr);
+            if (permDenied) {
+              console.error('[LOAN_APPROVE_PERMISSION_DENIED]', {
+                loanId,
+                actorId: actor.id,
+                table: 'books',
+                operation: 'update',
+                code: stockUpdateErr.code || '42501',
+                keyStatus: inspectServerSupabaseEnv().keyStatus,
+              });
+            }
+            return res.status(500).json({
+              error: permDenied
+                ? 'Izin database server untuk memperbarui stok buku (books) belum aktif (kode 42501). Persetujuan dibatalkan otomatis.'
+                : `Gagal memperbarui stok buku saat persetujuan; transaksi dibatalkan otomatis: ${stockUpdateErr.message}`,
+              code: permDenied ? 'DB_PERMISSION_DENIED' : 'BOOK_STOCK_UPDATE_FAILED',
+              rolledBack: true,
+            });
+          }
+
+          if (!updatedBookRows || updatedBookRows.length === 0) {
+            await rollbackApproveLoanStatus();
+            return res.status(409).json({
+              error: 'Stok buku berubah secara bersamaan saat persetujuan berlangsung. Transaksi dibatalkan otomatis.',
+              code: 'CONCURRENT_BOOK_STOCK_MODIFICATION',
+              rolledBack: true,
+            });
+          }
+
+          stockAdjusted = stockPlan.decrementedBy === 'application';
+        } else if (stockPlan.decrementedBy === 'trigger') {
+          stockAdjusted = true;
+        }
+
+        const [{ data: enrichedBookRows }, { data: enrichedProfileRows }] = await Promise.all([
+          supabaseAdmin
+            .from('books')
+            .select('id, title, author, cover_path, file_path, available_copies, total_copies')
+            .eq('id', updatedLoan.book_id)
+            .limit(2),
+          supabaseAdmin
+            .from('profiles')
+            .select('id, full_name, username')
+            .eq('id', updatedLoan.user_id)
+            .limit(2),
+        ]);
+
+        try {
+          await supabaseAdmin.from('activity_logs').insert({
+            actor_id: actor.id,
+            action: 'approve_loan',
+            entity_type: 'loans',
+            entity_id: loanId,
+            details: JSON.stringify({
+              stock_source: stockSource,
+            }),
+            created_at: nowIso,
+          });
+        } catch {
+          // Abaikan error logging non-kritikal
+        }
+
+        return res.json({
+          success: true,
+          stockAdjusted,
+          stockSource,
+          loan: {
+            ...updatedLoan,
+            book: enrichedBookRows?.[0] ?? undefined,
+            profile: enrichedProfileRows?.[0] ?? undefined,
+          },
+        });
+      });
+    } catch (err: any) {
+      return res.status(500).json({
+        error: err?.message || 'Gagal menyetujui peminjaman.',
+        code: 'INTERNAL_APPROVE_ERROR',
+      });
+    }
+  });
+
+  // Endpoint penolakan peminjaman buku oleh Admin/Super Admin via SUPABASE_SERVICE_ROLE_KEY
+  app.post('/api/loans/:id/reject', async (req: Request, res: Response) => {
+    try {
+      const loanId = String(req.params.id || '').trim();
+      if (!isValidUuid(loanId)) {
+        return res.status(400).json({
+          error: 'ID transaksi peminjaman tidak valid.',
+          code: 'INVALID_LOAN_ID',
+        });
+      }
+
+      const { client: supabaseAuth, error: authClientError } = getAuthClient();
+      if (!supabaseAuth) {
+        return res.status(500).json({
+          error: authClientError || 'Konfigurasi autentikasi server belum lengkap.',
+        });
+      }
+
+      const { client: supabaseAdmin, error: adminClientError } = getAdminClient();
+      if (!supabaseAdmin) {
+        return res.status(500).json({
+          error: adminClientError || 'Konfigurasi admin server belum lengkap.',
+        });
+      }
+
+      const authCheck = await verifyAuthenticatedUser(
+        req,
+        supabaseAuth,
+        supabaseAdmin,
+        'menolak peminjaman buku'
+      );
+      if (!authCheck.ok) {
+        return res.status(authCheck.status).json({ error: authCheck.error });
+      }
+
+      const actor = authCheck.userProfile;
+      const isActorAdmin = isAdminOrSuperAdminRole(actor.role) || actor.is_super_admin === true;
+      if (!isActorAdmin) {
+        return res.status(403).json({
+          error: 'Hanya administrator aktif yang berwenang menolak peminjaman buku.',
+          code: 'FORBIDDEN',
+        });
+      }
+
+      const { data: loanRows, error: fetchLoanError } = await supabaseAdmin
+        .from('loans')
+        .select('id, user_id, book_id, status')
+        .eq('id', loanId)
+        .limit(2);
+
+      if (fetchLoanError) {
+        const permDenied = isDbPermissionDeniedError(fetchLoanError);
+        if (permDenied) {
+          console.error('[LOAN_REJECT_PERMISSION_DENIED]', {
+            loanId,
+            actorId: actor.id,
+            table: 'loans',
+            operation: 'select',
+            code: fetchLoanError.code || '42501',
+            keyStatus: inspectServerSupabaseEnv().keyStatus,
+          });
+        }
+        return res.status(500).json({
+          error: permDenied
+            ? 'Izin database server untuk membaca tabel peminjaman (loans) belum aktif (kode 42501). Pastikan migrasi GRANT service_role pada public.loans dan SUPABASE_SERVICE_ROLE_KEY sudah terpasang.'
+            : `Gagal memeriksa transaksi peminjaman: ${fetchLoanError.message}`,
+          code: permDenied ? 'DB_PERMISSION_DENIED' : fetchLoanError.code || 'LOAN_FETCH_FAILED',
+        });
+      }
+
+      if (!loanRows || loanRows.length === 0) {
+        return res.status(404).json({
+          error: 'Data transaksi peminjaman tidak ditemukan.',
+          code: 'LOAN_NOT_FOUND',
+        });
+      }
+
+      if (loanRows.length > 1) {
+        return res.status(409).json({
+          error: 'Terdeteksi duplikasi data pada transaksi peminjaman ini.',
+          code: 'DUPLICATE_LOAN_TRANSACTION',
+        });
+      }
+
+      const existingLoan = loanRows[0];
+      if (existingLoan.status !== 'pending') {
+        return res.status(409).json({
+          error: 'Permintaan peminjaman ini sudah diproses sebelumnya.',
+          code: 'INVALID_LOAN_STATUS',
+        });
+      }
+
+      const body = (req.body || {}) as Record<string, unknown>;
+      const cleanReason =
+        typeof body.reason === 'string' && body.reason.trim()
+          ? body.reason.trim().slice(0, 500)
+          : 'Permintaan peminjaman belum dapat disetujui saat ini.';
+      const nowIso = new Date().toISOString();
+
+      const { data: updatedRows, error: updateError } = await supabaseAdmin
+        .from('loans')
+        .update({
+          status: 'rejected',
+          admin_note: cleanReason,
+          updated_at: nowIso,
+        })
+        .eq('id', loanId)
+        .eq('status', 'pending')
+        .select(
+          'id, user_id, book_id, status, requested_at, approved_at, due_at, returned_at, admin_note, created_at, updated_at'
+        );
+
+      if (updateError) {
+        const permDenied = isDbPermissionDeniedError(updateError);
+        if (permDenied) {
+          console.error('[LOAN_REJECT_PERMISSION_DENIED]', {
+            loanId,
+            actorId: actor.id,
+            table: 'loans',
+            operation: 'update',
+            code: updateError.code || '42501',
+            keyStatus: inspectServerSupabaseEnv().keyStatus,
+          });
+        }
+        return res.status(500).json({
+          error: permDenied
+            ? 'Izin database server untuk menolak peminjaman pada tabel loans belum aktif (kode 42501). Pastikan migrasi GRANT service_role pada public.loans sudah dijalankan.'
+            : `Gagal menolak peminjaman: ${updateError.message}`,
+          code: permDenied ? 'DB_PERMISSION_DENIED' : updateError.code || 'LOAN_REJECT_FAILED',
+        });
+      }
+
+      if (!updatedRows || updatedRows.length === 0) {
+        return res.status(409).json({
+          error: 'Permintaan peminjaman ini sudah diproses oleh admin lain.',
+          code: 'CONCURRENT_LOAN_MODIFICATION',
+        });
+      }
+
+      const updatedLoan = updatedRows[0];
+      const [{ data: enrichedBookRows }, { data: enrichedProfileRows }] = await Promise.all([
+        supabaseAdmin
+          .from('books')
+          .select('id, title, author, cover_path')
+          .eq('id', updatedLoan.book_id)
+          .limit(2),
+        supabaseAdmin
+          .from('profiles')
+          .select('id, full_name, username')
+          .eq('id', updatedLoan.user_id)
+          .limit(2),
+      ]);
+
+      try {
+        await supabaseAdmin.from('activity_logs').insert({
+          actor_id: actor.id,
+          action: 'reject_loan',
+          entity_type: 'loans',
+          entity_id: loanId,
+          details: JSON.stringify({ reason: cleanReason }),
+          created_at: nowIso,
+        });
+      } catch {
+        // Abaikan error logging non-kritikal
+      }
+
+      return res.json({
+        success: true,
+        loan: {
+          ...updatedLoan,
+          book: enrichedBookRows?.[0] ?? undefined,
+          profile: enrichedProfileRows?.[0] ?? undefined,
+        },
+      });
+    } catch (err: any) {
+      return res.status(500).json({
+        error: err?.message || 'Gagal menolak peminjaman.',
+        code: 'INTERNAL_REJECT_ERROR',
+      });
+    }
+  });
+
+  // Endpoint pembuatan Signed URL terverifikasi untuk membaca dokumen digital privat (bucket 'book-files')
+  // Hanya mengizinkan Admin aktif atau peminjam dengan transaksi 'approved'/'borrowed' yang belum kedaluwarsa.
+  app.post('/api/books/:id/read-url', async (req: Request, res: Response) => {
+    try {
+      const bookId = String(req.params.id || '').trim();
+      if (!isValidUuid(bookId)) {
+        return res.status(400).json({
+          error: 'ID buku tidak valid.',
+          code: 'INVALID_BOOK_ID',
+        });
+      }
+
+      const { client: supabaseAuth, error: authClientError } = getAuthClient();
+      if (!supabaseAuth) {
+        return res.status(500).json({
+          error: authClientError || 'Konfigurasi autentikasi server belum lengkap.',
+        });
+      }
+
+      const { client: supabaseAdmin, error: adminClientError } = getAdminClient();
+      if (!supabaseAdmin) {
+        return res.status(500).json({
+          error: adminClientError || 'Konfigurasi admin server belum lengkap.',
+        });
+      }
+
+      const authCheck = await verifyAuthenticatedUser(
+        req,
+        supabaseAuth,
+        supabaseAdmin,
+        'mengakses dokumen digital buku'
+      );
+      if (!authCheck.ok) {
+        return res.status(authCheck.status).json({ error: authCheck.error });
+      }
+
+      const actor = authCheck.userProfile;
+      const isActorAdmin = isAdminOrSuperAdminRole(actor.role) || actor.is_super_admin === true;
+
+      const { data: bookRows, error: bookErr } = await supabaseAdmin
+        .from('books')
+        .select('id, title, file_path, file_type, is_archived')
+        .eq('id', bookId)
+        .limit(2);
+
+      if (bookErr) {
+        const permDenied = isDbPermissionDeniedError(bookErr);
+        return res.status(500).json({
+          error: `Gagal memeriksa dokumen buku: ${bookErr.message}`,
+          code: permDenied ? 'DB_PERMISSION_DENIED' : bookErr.code || 'BOOK_FETCH_FAILED',
+        });
+      }
+
+      if (!bookRows || bookRows.length === 0) {
+        return res.status(404).json({
+          error: 'Data buku tidak ditemukan.',
+          code: 'BOOK_NOT_FOUND',
+        });
+      }
+
+      const book = bookRows[0];
+      if (!book.file_path) {
+        return res.status(404).json({
+          error: 'Buku ini tidak memiliki lampiran dokumen digital (koleksi fisik).',
+          code: 'NO_DIGITAL_FILE',
+        });
+      }
+
+      if (!isActorAdmin) {
+        const { data: activeLoanRows, error: loanErr } = await supabaseAdmin
+          .from('loans')
+          .select('id, status, due_at')
+          .eq('user_id', actor.id)
+          .eq('book_id', bookId)
+          .in('status', ['approved', 'borrowed'])
+          .limit(10);
+
+        if (loanErr) {
+          const permDenied = isDbPermissionDeniedError(loanErr);
+          return res.status(500).json({
+            error: `Gagal memverifikasi hak akses peminjaman: ${loanErr.message}`,
+            code: permDenied ? 'DB_PERMISSION_DENIED' : loanErr.code || 'LOAN_CHECK_FAILED',
+          });
+        }
+
+        if (!activeLoanRows || activeLoanRows.length === 0) {
+          return res.status(403).json({
+            error: 'Anda belum memiliki peminjaman aktif yang disetujui untuk membaca dokumen digital buku ini.',
+            code: 'FORBIDDEN',
+          });
+        }
+
+        const nowMs = Date.now();
+        const hasValidUnexpiredLoan = activeLoanRows.some((loan: any) => {
+          if (!loan.due_at) return true;
+          const dueMs = new Date(loan.due_at).getTime();
+          return Number.isNaN(dueMs) || dueMs >= nowMs;
+        });
+
+        if (!hasValidUnexpiredLoan) {
+          return res.status(403).json({
+            error: 'Masa peminjaman untuk membaca dokumen digital ini telah berakhir. Silakan kembalikan buku atau ajukan peminjaman ulang.',
+            code: 'LOAN_EXPIRED',
+          });
+        }
+      }
+
+      const { data: signedData, error: signedErr } = await supabaseAdmin.storage
+        .from('book-files')
+        .createSignedUrl(book.file_path, 7200);
+
+      if (signedErr || !signedData?.signedUrl) {
+        return res.status(500).json({
+          error: signedErr?.message || 'Gagal membuat tautan baca dokumen digital.',
+          code: 'SIGNED_URL_FAILED',
+        });
+      }
+
+      return res.json({
+        success: true,
+        url: signedData.signedUrl,
+        fileType: book.file_type || 'pdf',
+      });
+    } catch (err: any) {
+      return res.status(500).json({
+        error: err?.message || 'Terjadi kesalahan saat menyiapkan dokumen digital.',
+        code: 'INTERNAL_READ_URL_ERROR',
+      });
     }
   });
 
