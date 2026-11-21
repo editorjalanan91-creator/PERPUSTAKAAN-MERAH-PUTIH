@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { libraryService } from './services/libraryService';
 import { Book, Category, Loan, Profile, ActivityLog } from './types';
@@ -80,6 +80,15 @@ function LibraryApp() {
   const [visitors, setVisitors] = useState<Profile[]>([]);
   const [activityLogs, setActivityLogs] = useState<ActivityLog[]>([]);
 
+  const booksRef = useRef<Book[]>([]);
+  const categoriesRef = useRef<Category[]>([]);
+  useEffect(() => {
+    booksRef.current = books;
+  }, [books]);
+  useEffect(() => {
+    categoriesRef.current = categories;
+  }, [categories]);
+
   // Visitor Navigation State
   const [visitorTab, setVisitorTab] = useState<'home' | 'catalog' | 'loans' | 'profile'>('home');
   const [catalogInitialCategory, setCatalogInitialCategory] = useState<string | undefined>(undefined);
@@ -106,10 +115,6 @@ function LibraryApp() {
         libraryService.getLoans(user.id, isAdmin),
       ]);
 
-      const rawBooks = booksRes.status === 'fulfilled' ? booksRes.value : [];
-      const rawCats = catsRes.status === 'fulfilled' ? catsRes.value : [];
-      const rawLoans = loansRes.status === 'fulfilled' ? loansRes.value : [];
-
       if (booksRes.status === 'rejected') {
         console.error('Error loading books:', booksRes.reason);
       }
@@ -120,9 +125,13 @@ function LibraryApp() {
         console.error('Error loading loans:', loansRes.reason);
       }
 
-      const catMap = new Map(rawCats.map((c) => [c.id, c]));
+      // Pertahankan state sebelumnya bila salah satu fetch gagal sementara agar katalog tidak kosong mendadak
+      const effectiveRawCats = catsRes.status === 'fulfilled' ? catsRes.value : categoriesRef.current;
+      const effectiveRawBooks = booksRes.status === 'fulfilled' ? booksRes.value : booksRef.current;
+
+      const catMap = new Map(effectiveRawCats.map((c) => [c.id, c]));
       const bookCountByCat: Record<string, number> = {};
-      const enrichedBooks = rawBooks.map((b) => {
+      const enrichedBooks = effectiveRawBooks.map((b) => {
         if (!b.is_archived && b.category_id) {
           bookCountByCat[b.category_id] = (bookCountByCat[b.category_id] || 0) + 1;
         }
@@ -137,29 +146,35 @@ function LibraryApp() {
         };
       });
 
-      const enrichedCats = rawCats.map((cat) => ({
-        ...cat,
-        bookCount: cat.bookCount && cat.bookCount > 0 ? cat.bookCount : bookCountByCat[cat.id] || 0,
-      }));
+      if (booksRes.status === 'fulfilled') {
+        setBooks(enrichedBooks);
+      }
 
-      const bookMap = new Map(enrichedBooks.map((b) => [b.id, b]));
-      const enrichedLoans = rawLoans.map((l) => {
-        const matchedBook = bookMap.get(l.book_id);
-        return {
-          ...l,
-          book: l.book
-            ? {
-                ...matchedBook,
-                ...l.book,
-                category_name: l.book.category_name || matchedBook?.category_name,
-              }
-            : matchedBook,
-        };
-      });
+      if (catsRes.status === 'fulfilled') {
+        const enrichedCats = catsRes.value.map((cat) => ({
+          ...cat,
+          bookCount: cat.bookCount && cat.bookCount > 0 ? cat.bookCount : bookCountByCat[cat.id] || 0,
+        }));
+        setCategories(enrichedCats);
+      }
 
-      setBooks(enrichedBooks);
-      setCategories(enrichedCats);
-      setLoans(enrichedLoans);
+      if (loansRes.status === 'fulfilled') {
+        const bookMap = new Map(enrichedBooks.map((b) => [b.id, b]));
+        const enrichedLoans = loansRes.value.map((l) => {
+          const matchedBook = bookMap.get(l.book_id);
+          return {
+            ...l,
+            book: l.book
+              ? {
+                  ...matchedBook,
+                  ...l.book,
+                  category_name: l.book.category_name || matchedBook?.category_name,
+                }
+              : matchedBook,
+          };
+        });
+        setLoans(enrichedLoans);
+      }
 
       if (booksRes.status === 'rejected' || loansRes.status === 'rejected') {
         const primaryErr =
@@ -170,11 +185,11 @@ function LibraryApp() {
 
       if (isAdmin) {
         const [visitorsData, logsData] = await Promise.all([
-          libraryService.getVisitors().catch(() => []),
-          libraryService.getActivityLogs().catch(() => []),
+          libraryService.getVisitors().catch(() => null),
+          libraryService.getActivityLogs().catch(() => null),
         ]);
-        setVisitors(visitorsData);
-        setActivityLogs(logsData);
+        if (visitorsData) setVisitors(visitorsData);
+        if (logsData) setActivityLogs(logsData);
       }
     } catch (err: any) {
       console.error('Error loading Supabase library data:', err);
@@ -182,11 +197,15 @@ function LibraryApp() {
     }
   }, [user, isAdmin, showToast]);
 
-  // Initial load and Realtime Subscriptions
+  const lastVisibilitySyncRef = useRef<number>(0);
+  const hasMountedNavSyncRef = useRef<boolean>(false);
+
+  // Initial load, Realtime Subscriptions, and focus/visibility sync fallback
   useEffect(() => {
     if (!user || isPasswordRecovery) return;
 
     loadData();
+    lastVisibilitySyncRef.current = Date.now();
 
     // Subscribe to Realtime Postgres Changes
     const unsubscribe = libraryService.subscribeToChanges(
@@ -195,10 +214,54 @@ function LibraryApp() {
       () => loadData()
     );
 
+    const handleSyncOnFocus = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      const now = Date.now();
+      if (now - lastVisibilitySyncRef.current < 2000) return;
+      lastVisibilitySyncRef.current = now;
+      void loadData();
+    };
+
+    if (typeof window !== 'undefined') {
+      window.addEventListener('focus', handleSyncOnFocus);
+      document.addEventListener('visibilitychange', handleSyncOnFocus);
+    }
+
     return () => {
       unsubscribe();
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('focus', handleSyncOnFocus);
+        document.removeEventListener('visibilitychange', handleSyncOnFocus);
+      }
     };
   }, [user, isPasswordRecovery, loadData]);
+
+  // Sinkronkan ulang data saat berpindah tab/mode Admin ↔ Pengunjung agar perubahan koleksi selalu konsisten
+  useEffect(() => {
+    if (!user || isPasswordRecovery) return;
+    if (!hasMountedNavSyncRef.current) {
+      hasMountedNavSyncRef.current = true;
+      return;
+    }
+    const now = Date.now();
+    if (now - lastVisibilitySyncRef.current < 800) return;
+    lastVisibilitySyncRef.current = now;
+    void loadData();
+  }, [user, isPasswordRecovery, isAdminPreviewingVisitor, adminTab, visitorTab, loadData]);
+
+  // Sinkronkan modal detail buku yang terbuka dengan data buku terbaru (atau tutup jika dihapus/diarsipkan)
+  useEffect(() => {
+    if (!selectedBook) return;
+    const latest = books.find((b) => b.id === selectedBook.id);
+    const isVisitorCatalogMode = !isAdmin || isAdminPreviewingVisitor;
+    if (!latest || (isVisitorCatalogMode && (latest.is_published === false || latest.is_archived))) {
+      setSelectedBook(null);
+      return;
+    }
+    if (latest !== selectedBook) {
+      setSelectedBook(latest);
+    }
+  }, [books, selectedBook, isAdmin, isAdminPreviewingVisitor]);
 
   // Handle Book Loan Request (Status: pending)
   const handleBorrowBook = async (bookId: string, notes?: string) => {
@@ -331,15 +394,39 @@ function LibraryApp() {
   };
 
   // --- Admin Books CRUD Handlers ---
+  const mergeConfirmedBook = useCallback((confirmedBook: Book) => {
+    const matchedCat = confirmedBook.category_id
+      ? categoriesRef.current.find((c) => c.id === confirmedBook.category_id)
+      : undefined;
+    const enriched: Book = {
+      ...confirmedBook,
+      category: confirmedBook.category || matchedCat,
+      category_name:
+        confirmedBook.category?.name ||
+        matchedCat?.name ||
+        (confirmedBook.category_name && confirmedBook.category_name !== 'Tanpa Kategori'
+          ? confirmedBook.category_name
+          : 'Tanpa Kategori'),
+    };
+    setBooks((prev) => {
+      const exists = prev.some((b) => b.id === enriched.id);
+      if (exists) {
+        return prev.map((b) => (b.id === enriched.id ? enriched : b));
+      }
+      return [enriched, ...prev];
+    });
+  }, []);
+
   const handleAddBook = async (bookData: Partial<Book>) => {
     try {
-      await libraryService.addBook(
+      const createdBook = await libraryService.addBook(
         {
           ...bookData,
           title: bookData.title || 'Judul Buku Baru',
         },
         user?.id
       );
+      mergeConfirmedBook(createdBook);
       showToast('Buku baru berhasil ditambahkan ke inventaris perpustakaan.', 'success', 'Buku Ditambahkan');
       await loadData();
     } catch (err: any) {
@@ -350,7 +437,8 @@ function LibraryApp() {
 
   const handleUpdateBook = async (id: string, bookData: Partial<Book>) => {
     try {
-      await libraryService.updateBook(id, bookData, user?.id);
+      const updatedBook = await libraryService.updateBook(id, bookData, user?.id);
+      mergeConfirmedBook(updatedBook);
       showToast('Data buku berhasil diperbarui di database.', 'success', 'Buku Diperbarui');
       await loadData();
     } catch (err: any) {
@@ -362,7 +450,9 @@ function LibraryApp() {
   const handleDeleteBook = async (id: string) => {
     try {
       await libraryService.deleteBook(id, user?.id);
-      showToast('Buku telah dihapus dari sistem perpustakaan.', 'success', 'Buku Dihapus');
+      setBooks((prev) => prev.filter((b) => b.id !== id));
+      setSelectedBook((prev) => (prev?.id === id ? null : prev));
+      showToast('Buku telah dihapus permanen dari sistem perpustakaan.', 'success', 'Buku Dihapus');
       await loadData();
     } catch (err: any) {
       showToast(err?.message || 'Gagal menghapus buku.', 'error');
@@ -372,7 +462,11 @@ function LibraryApp() {
 
   const handleToggleArchiveBook = async (id: string, isArchived: boolean) => {
     try {
-      await libraryService.toggleArchiveBook(id, isArchived, user?.id);
+      const updatedBook = await libraryService.toggleArchiveBook(id, isArchived, user?.id);
+      mergeConfirmedBook(updatedBook);
+      if (isArchived) {
+        setSelectedBook((prev) => (prev?.id === id ? null : prev));
+      }
       showToast(
         isArchived
           ? 'Buku berhasil diarsipkan dan disembunyikan dari katalog pengunjung.'

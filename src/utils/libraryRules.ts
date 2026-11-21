@@ -111,10 +111,10 @@ export function filterAndSortBooks(
     const q = options.query.toLowerCase().trim();
     result = result.filter(
       (b) =>
-        b.title.toLowerCase().includes(q) ||
-        b.author.toLowerCase().includes(q) ||
-        b.publisher.toLowerCase().includes(q) ||
-        b.isbn.toLowerCase().includes(q) ||
+        (b.title || '').toLowerCase().includes(q) ||
+        (b.author || '').toLowerCase().includes(q) ||
+        (b.publisher || '').toLowerCase().includes(q) ||
+        (b.isbn || '').toLowerCase().includes(q) ||
         (b.description || '').toLowerCase().includes(q) ||
         (b.category_name || b.category?.name || '').toLowerCase().includes(q)
     );

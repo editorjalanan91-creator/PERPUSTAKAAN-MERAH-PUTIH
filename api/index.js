@@ -182,6 +182,30 @@ var BOOK_RETURN_NOTIFICATIONS = {
     message: "Permintaan pengembalian buku belum dapat dikonfirmasi oleh sistem. Silakan periksa status peminjaman Anda atau hubungi administrator perpustakaan apabila kendala masih terjadi."
   }
 };
+function recalculateBookStockOnEdit(oldTotalCopies, oldAvailableCopies, newTotalCopies) {
+  if (!Number.isInteger(newTotalCopies) || newTotalCopies < 1) {
+    return {
+      valid: false,
+      error: "Total eksemplar buku minimal harus 1 dan berupa bilangan bulat."
+    };
+  }
+  const safeOldTotal = Math.max(0, Math.floor(Number(oldTotalCopies) || 0));
+  const safeOldAvailable = Math.max(0, Math.min(safeOldTotal, Math.floor(Number(oldAvailableCopies) || 0)));
+  const borrowedCount = Math.max(0, safeOldTotal - safeOldAvailable);
+  if (newTotalCopies < borrowedCount) {
+    return {
+      valid: false,
+      error: `Total eksemplar (${newTotalCopies}) tidak boleh lebih kecil dari jumlah buku yang sedang dipinjam (${borrowedCount} eksemplar).`
+    };
+  }
+  const availableCopies = Math.max(0, Math.min(newTotalCopies, newTotalCopies - borrowedCount));
+  return {
+    valid: true,
+    totalCopies: newTotalCopies,
+    availableCopies,
+    borrowedCount
+  };
+}
 var MAX_COVER_SIZE_BYTES = 5 * 1024 * 1024;
 var MAX_BOOK_DOC_SIZE_BYTES = 50 * 1024 * 1024;
 function evaluateLoanReturnEligibility(status) {
@@ -879,7 +903,7 @@ async function verifyAdminRequest(req, supabaseAuth, supabaseAdmin) {
       error: isPermDenied ? `Gagal memverifikasi role administrator: ${profileError.message}. Pastikan SUPABASE_SERVICE_ROLE_KEY di Environment Variables Vercel benar-benar menggunakan Service Role / Secret Key Supabase (bukan Publishable/Anon Key) dan hak akses service_role pada tabel public.profiles aktif.` : `Gagal memverifikasi role administrator: ${profileError.message}`
     };
   }
-  if (!actorProfile || !isAdminOrSuperAdminRole(actorProfile.role)) {
+  if (!actorProfile || !isAdminOrSuperAdminRole(actorProfile.role) && actorProfile.is_super_admin !== true) {
     return {
       ok: false,
       status: 403,
@@ -2306,11 +2330,7 @@ function createApp(options = {}) {
       }
       const actor = authCheck.userProfile;
       const isActorAdmin = isAdminOrSuperAdminRole(actor.role) || actor.is_super_admin === true;
-      let query = supabaseAdmin.from("books").select("*").order("created_at", { ascending: false });
-      if (!isActorAdmin) {
-        query = query.eq("is_published", true).eq("is_archived", false);
-      }
-      const { data: bookRows, error: booksErr } = await query;
+      const { data: bookRows, error: booksErr } = await supabaseAdmin.from("books").select("*").order("created_at", { ascending: false });
       if (booksErr) {
         const permDenied = isDbPermissionDeniedError(booksErr);
         return res.status(500).json({
@@ -2318,11 +2338,16 @@ function createApp(options = {}) {
           code: permDenied ? "DB_PERMISSION_DENIED" : booksErr.code || "BOOKS_FETCH_FAILED"
         });
       }
+      const visibleBookRows = (bookRows || []).filter(
+        (b) => isActorAdmin ? true : b.is_published !== false && !b.is_archived
+      );
       const catMap = await loadCategoryMapSafe(supabaseAdmin);
-      const enrichedBooks = (bookRows || []).map((b) => {
+      const enrichedBooks = visibleBookRows.map((b) => {
         const cat = b.category_id ? catMap.get(b.category_id) : void 0;
         return {
           ...b,
+          is_published: b.is_published !== false,
+          is_archived: Boolean(b.is_archived),
           ...cat ? { category: cat, category_name: cat.name } : {}
         };
       });
@@ -2348,18 +2373,29 @@ function createApp(options = {}) {
       }
       const body = req.body || {};
       const cleanTitle = String(body.title || "").trim();
+      const cleanAuthor = String(body.author || "Penulis Mandiri").trim();
       const cleanCategoryId = String(body.category_id || "").trim();
       if (cleanTitle.length < 2) {
         return res.status(400).json({ error: "Judul buku wajib diisi minimal 2 karakter." });
+      }
+      if (cleanAuthor.length < 2) {
+        return res.status(400).json({ error: "Nama penulis wajib diisi minimal 2 karakter." });
       }
       if (!cleanCategoryId) {
         return res.status(400).json({
           error: "Kategori buku wajib dipilih sebelum menyimpan data buku."
         });
       }
+      const parsedYear = Number(body.publication_year ?? body.year ?? (/* @__PURE__ */ new Date()).getFullYear());
+      const maxYear = (/* @__PURE__ */ new Date()).getFullYear() + 1;
+      if (!Number.isInteger(parsedYear) || parsedYear < 1800 || parsedYear > maxYear) {
+        return res.status(400).json({
+          error: `Tahun terbit harus berupa angka antara 1800 hingga ${maxYear}.`
+        });
+      }
       const totalCopies = Math.max(
         1,
-        Math.floor(Number(body.total_copies || body.stock || 1) || 1)
+        Math.floor(Number(body.total_copies ?? body.stock ?? 1) || 1)
       );
       const rawAvailable = body.available_copies !== void 0 ? Number(body.available_copies) : totalCopies;
       const availableCopies = Math.max(
@@ -2369,10 +2405,10 @@ function createApp(options = {}) {
       const nowIso = (/* @__PURE__ */ new Date()).toISOString();
       const { data: insertedRows, error: insertErr } = await supabaseAdmin.from("books").insert({
         title: cleanTitle,
-        author: String(body.author || "Penulis Mandiri").trim(),
-        publisher: String(body.publisher || "Penerbit Mandiri").trim(),
-        publication_year: Number(body.publication_year || body.year || (/* @__PURE__ */ new Date()).getFullYear()),
-        isbn: String(body.isbn || "ISBN-978-000-000").trim(),
+        author: cleanAuthor,
+        publisher: String(body.publisher || "Penerbit Mandiri").trim() || "Penerbit Mandiri",
+        publication_year: parsedYear,
+        isbn: String(body.isbn || "ISBN-978-000-000").trim() || "ISBN-978-000-000",
         category_id: cleanCategoryId,
         description: body.description ? String(body.description).trim() : null,
         cover_path: body.cover_path || body.coverUrl || null,
@@ -2388,8 +2424,9 @@ function createApp(options = {}) {
       }).select("*");
       if (insertErr) {
         const permDenied = isDbPermissionDeniedError(insertErr);
-        return res.status(500).json({
-          error: `Gagal menyimpan buku baru: ${insertErr.message}`,
+        const isFk = String(insertErr.code || "") === "23503";
+        return res.status(isFk ? 400 : 500).json({
+          error: isFk ? "Kategori buku tidak ditemukan atau tidak valid." : `Gagal menyimpan buku baru: ${insertErr.message}`,
           code: permDenied ? "DB_PERMISSION_DENIED" : insertErr.code || "BOOK_INSERT_FAILED"
         });
       }
@@ -2414,6 +2451,8 @@ function createApp(options = {}) {
         success: true,
         book: {
           ...book,
+          is_published: book.is_published !== false,
+          is_archived: Boolean(book.is_archived),
           ...cat ? { category: cat, category_name: cat.name } : {}
         }
       });
@@ -2441,40 +2480,193 @@ function createApp(options = {}) {
         return res.status(authCheck.status).json({ error: authCheck.error });
       }
       const rawUpdates = req.body || {};
-      const { category: _c, category_name: _cn, id: _id, created_at: _ca, created_by: _cb, ...cleanUpdates } = rawUpdates;
-      cleanUpdates.updated_at = (/* @__PURE__ */ new Date()).toISOString();
-      const { data: updatedRows, error: updateErr } = await supabaseAdmin.from("books").update(cleanUpdates).eq("id", bookId).select("*");
-      if (updateErr) {
-        const permDenied = isDbPermissionDeniedError(updateErr);
-        return res.status(500).json({
-          error: `Gagal memperbarui buku: ${updateErr.message}`,
-          code: permDenied ? "DB_PERMISSION_DENIED" : updateErr.code || "BOOK_UPDATE_FAILED"
-        });
-      }
-      const book = updatedRows?.[0];
-      if (!book) {
-        return res.status(404).json({ error: "Data buku tidak ditemukan." });
-      }
-      try {
-        await supabaseAdmin.from("activity_logs").insert({
-          actor_id: authCheck.adminProfile.id,
-          action: "update_book",
-          entity_type: "books",
-          entity_id: bookId,
-          details: JSON.stringify({ title: book.title }),
-          created_at: cleanUpdates.updated_at
-        });
-      } catch {
-      }
-      const catMap = await loadCategoryMapSafe(supabaseAdmin);
-      const cat = book.category_id ? catMap.get(book.category_id) : void 0;
-      return res.json({
-        success: true,
-        book: {
-          ...book,
-          ...cat ? { category: cat, category_name: cat.name } : {}
+      const result = await withBookStockLock(bookId, async () => {
+        const { data: existingRows, error: fetchErr } = await supabaseAdmin.from("books").select("*").eq("id", bookId);
+        if (fetchErr) {
+          const permDenied = isDbPermissionDeniedError(fetchErr);
+          return {
+            status: 500,
+            payload: {
+              error: `Gagal memeriksa data buku: ${fetchErr.message}`,
+              code: permDenied ? "DB_PERMISSION_DENIED" : fetchErr.code || "BOOK_FETCH_FAILED"
+            }
+          };
         }
+        const existingBook = existingRows?.[0];
+        if (!existingBook) {
+          return {
+            status: 404,
+            payload: {
+              error: "Data buku tidak ditemukan di database.",
+              code: "BOOK_NOT_FOUND"
+            }
+          };
+        }
+        const cleanUpdates = {};
+        if (rawUpdates.title !== void 0) {
+          const title = String(rawUpdates.title || "").trim();
+          if (title.length < 2) {
+            return {
+              status: 400,
+              payload: { error: "Judul buku wajib diisi minimal 2 karakter.", code: "INVALID_INPUT" }
+            };
+          }
+          cleanUpdates.title = title;
+        }
+        if (rawUpdates.author !== void 0) {
+          const author = String(rawUpdates.author || "").trim();
+          if (author.length < 2) {
+            return {
+              status: 400,
+              payload: { error: "Nama penulis wajib diisi minimal 2 karakter.", code: "INVALID_INPUT" }
+            };
+          }
+          cleanUpdates.author = author;
+        }
+        if (rawUpdates.publisher !== void 0) {
+          cleanUpdates.publisher = String(rawUpdates.publisher || "").trim() || "Penerbit Mandiri";
+        }
+        if (rawUpdates.publication_year !== void 0 || rawUpdates.year !== void 0) {
+          const pubYear = Number(rawUpdates.publication_year ?? rawUpdates.year);
+          const maxYear = (/* @__PURE__ */ new Date()).getFullYear() + 1;
+          if (!Number.isInteger(pubYear) || pubYear < 1800 || pubYear > maxYear) {
+            return {
+              status: 400,
+              payload: {
+                error: `Tahun terbit harus berupa angka antara 1800 hingga ${maxYear}.`,
+                code: "INVALID_INPUT"
+              }
+            };
+          }
+          cleanUpdates.publication_year = pubYear;
+        }
+        if (rawUpdates.isbn !== void 0) {
+          const isbn = String(rawUpdates.isbn || "").trim();
+          if (isbn.length > 0 && !/^[0-9Xx\-\s]{4,32}$/.test(isbn)) {
+            return {
+              status: 400,
+              payload: {
+                error: "Format nomor ISBN tidak valid.",
+                code: "INVALID_INPUT"
+              }
+            };
+          }
+          cleanUpdates.isbn = isbn || "ISBN-978-000-000";
+        }
+        if (rawUpdates.category_id !== void 0) {
+          const catId = String(rawUpdates.category_id || "").trim();
+          if (!catId) {
+            return {
+              status: 400,
+              payload: { error: "Kategori buku wajib dipilih.", code: "INVALID_INPUT" }
+            };
+          }
+          cleanUpdates.category_id = catId;
+        }
+        if (rawUpdates.description !== void 0) {
+          cleanUpdates.description = rawUpdates.description ? String(rawUpdates.description).trim() : null;
+        }
+        if (rawUpdates.cover_path !== void 0 || rawUpdates.coverUrl !== void 0) {
+          const cov = rawUpdates.cover_path !== void 0 ? rawUpdates.cover_path : rawUpdates.coverUrl;
+          cleanUpdates.cover_path = cov ? String(cov).trim() : null;
+        }
+        if (rawUpdates.file_path !== void 0) {
+          cleanUpdates.file_path = rawUpdates.file_path ? String(rawUpdates.file_path).trim() : null;
+        }
+        if (rawUpdates.file_type !== void 0) {
+          cleanUpdates.file_type = rawUpdates.file_type ? String(rawUpdates.file_type).trim() : null;
+        }
+        if (rawUpdates.is_published !== void 0) {
+          cleanUpdates.is_published = Boolean(rawUpdates.is_published);
+        }
+        if (rawUpdates.is_archived !== void 0) {
+          cleanUpdates.is_archived = Boolean(rawUpdates.is_archived);
+        }
+        if (rawUpdates.total_copies !== void 0 || rawUpdates.stock !== void 0) {
+          const requestedTotal = Number(rawUpdates.total_copies ?? rawUpdates.stock);
+          const stockCalc = recalculateBookStockOnEdit(
+            existingBook.total_copies,
+            existingBook.available_copies,
+            requestedTotal
+          );
+          if (!stockCalc.valid) {
+            return {
+              status: 400,
+              payload: {
+                error: stockCalc.error,
+                code: "INVALID_BOOK_STOCK"
+              }
+            };
+          }
+          const { data: activeIssuedLoans, error: activeErr } = await supabaseAdmin.from("loans").select("id").eq("book_id", bookId).in("status", ["approved", "borrowed"]);
+          if (!activeErr && Array.isArray(activeIssuedLoans)) {
+            if (stockCalc.totalCopies < activeIssuedLoans.length) {
+              return {
+                status: 409,
+                payload: {
+                  error: `Total eksemplar (${stockCalc.totalCopies}) tidak boleh lebih kecil dari jumlah pinjaman aktif (${activeIssuedLoans.length} eksemplar).`,
+                  code: "BOOK_STOCK_BELOW_ACTIVE_LOANS"
+                }
+              };
+            }
+            cleanUpdates.total_copies = stockCalc.totalCopies;
+            cleanUpdates.available_copies = Math.max(
+              0,
+              Math.min(stockCalc.availableCopies, stockCalc.totalCopies - activeIssuedLoans.length)
+            );
+          } else {
+            cleanUpdates.total_copies = stockCalc.totalCopies;
+            cleanUpdates.available_copies = stockCalc.availableCopies;
+          }
+        }
+        cleanUpdates.updated_at = (/* @__PURE__ */ new Date()).toISOString();
+        const { data: updatedRows, error: updateErr } = await supabaseAdmin.from("books").update(cleanUpdates).eq("id", bookId).select("*");
+        if (updateErr) {
+          const permDenied = isDbPermissionDeniedError(updateErr);
+          const isFk = String(updateErr.code || "") === "23503";
+          return {
+            status: isFk ? 400 : 500,
+            payload: {
+              error: isFk ? "Kategori buku tidak ditemukan atau tidak valid." : `Gagal memperbarui buku: ${updateErr.message}`,
+              code: permDenied ? "DB_PERMISSION_DENIED" : updateErr.code || "BOOK_UPDATE_FAILED"
+            }
+          };
+        }
+        const book = updatedRows?.[0];
+        if (!book) {
+          return {
+            status: 404,
+            payload: { error: "Data buku tidak ditemukan.", code: "BOOK_NOT_FOUND" }
+          };
+        }
+        const actionName = rawUpdates.is_archived === true ? "archive_book" : rawUpdates.is_archived === false ? "restore_book" : "update_book";
+        try {
+          await supabaseAdmin.from("activity_logs").insert({
+            actor_id: authCheck.adminProfile.id,
+            action: actionName,
+            entity_type: "books",
+            entity_id: bookId,
+            details: JSON.stringify({ title: book.title, is_archived: Boolean(book.is_archived) }),
+            created_at: cleanUpdates.updated_at
+          });
+        } catch {
+        }
+        const catMap = await loadCategoryMapSafe(supabaseAdmin);
+        const cat = book.category_id ? catMap.get(book.category_id) : void 0;
+        return {
+          status: 200,
+          payload: {
+            success: true,
+            book: {
+              ...book,
+              is_published: book.is_published !== false,
+              is_archived: Boolean(book.is_archived),
+              ...cat ? { category: cat, category_name: cat.name } : {}
+            }
+          }
+        };
       });
+      return res.status(result.status).json(result.payload);
     } catch (err) {
       return res.status(500).json({
         error: err?.message || "Terjadi kesalahan server saat memperbarui buku."
@@ -2498,39 +2690,121 @@ function createApp(options = {}) {
       if (!authCheck.ok) {
         return res.status(authCheck.status).json({ error: authCheck.error });
       }
-      const { data: activeLoans, error: loansErr } = await supabaseAdmin.from("loans").select("id").eq("book_id", bookId).in("status", ["pending", "approved", "borrowed"]).limit(1);
-      if (loansErr) {
-        const permDenied = isDbPermissionDeniedError(loansErr);
-        return res.status(500).json({
-          error: `Gagal memeriksa status peminjaman buku: ${loansErr.message}`,
-          code: permDenied ? "DB_PERMISSION_DENIED" : loansErr.code || "LOANS_CHECK_FAILED"
-        });
-      }
-      if (activeLoans && activeLoans.length > 0) {
-        return res.status(409).json({
-          error: "Buku ini tidak dapat dihapus karena masih memiliki transaksi peminjaman aktif.",
-          code: "BOOK_HAS_ACTIVE_LOANS"
-        });
-      }
-      const { error: deleteErr } = await supabaseAdmin.from("books").delete().eq("id", bookId);
-      if (deleteErr) {
-        const permDenied = isDbPermissionDeniedError(deleteErr);
-        return res.status(500).json({
-          error: `Gagal menghapus buku: ${deleteErr.message}`,
-          code: permDenied ? "DB_PERMISSION_DENIED" : deleteErr.code || "BOOK_DELETE_FAILED"
-        });
-      }
-      try {
-        await supabaseAdmin.from("activity_logs").insert({
-          actor_id: authCheck.adminProfile.id,
-          action: "delete_book",
-          entity_type: "books",
-          entity_id: bookId,
-          created_at: (/* @__PURE__ */ new Date()).toISOString()
-        });
-      } catch {
-      }
-      return res.json({ success: true });
+      const result = await withBookStockLock(bookId, async () => {
+        const { data: existingRows, error: fetchErr } = await supabaseAdmin.from("books").select("id, title, cover_path, file_path").eq("id", bookId);
+        if (fetchErr) {
+          const permDenied = isDbPermissionDeniedError(fetchErr);
+          return {
+            status: 500,
+            payload: {
+              error: `Gagal memeriksa data buku: ${fetchErr.message}`,
+              code: permDenied ? "DB_PERMISSION_DENIED" : fetchErr.code || "BOOK_FETCH_FAILED"
+            }
+          };
+        }
+        const existingBook = existingRows?.[0];
+        if (!existingBook) {
+          return {
+            status: 404,
+            payload: {
+              error: "Buku tidak ditemukan atau sudah dihapus sebelumnya.",
+              code: "BOOK_NOT_FOUND"
+            }
+          };
+        }
+        const { data: activeLoans, error: activeLoansErr } = await supabaseAdmin.from("loans").select("id").eq("book_id", bookId).in("status", ["pending", "approved", "borrowed"]).limit(1);
+        if (activeLoansErr) {
+          const permDenied = isDbPermissionDeniedError(activeLoansErr);
+          return {
+            status: 500,
+            payload: {
+              error: `Gagal memeriksa status peminjaman aktif buku: ${activeLoansErr.message}`,
+              code: permDenied ? "DB_PERMISSION_DENIED" : activeLoansErr.code || "LOANS_CHECK_FAILED"
+            }
+          };
+        }
+        if (activeLoans && activeLoans.length > 0) {
+          return {
+            status: 409,
+            payload: {
+              error: "Buku ini tidak dapat dihapus permanen karena masih memiliki transaksi peminjaman aktif atau menunggu persetujuan. Selesaikan peminjaman terlebih dahulu atau gunakan fitur Arsipkan Buku.",
+              code: "BOOK_HAS_ACTIVE_LOANS",
+              canArchive: true
+            }
+          };
+        }
+        const { data: anyLoans, error: historyErr } = await supabaseAdmin.from("loans").select("id, status").eq("book_id", bookId).limit(1);
+        if (historyErr) {
+          const permDenied = isDbPermissionDeniedError(historyErr);
+          return {
+            status: 500,
+            payload: {
+              error: `Gagal memeriksa riwayat peminjaman buku: ${historyErr.message}`,
+              code: permDenied ? "DB_PERMISSION_DENIED" : historyErr.code || "LOANS_CHECK_FAILED"
+            }
+          };
+        }
+        if (anyLoans && anyLoans.length > 0) {
+          return {
+            status: 409,
+            payload: {
+              error: "Buku ini memiliki riwayat transaksi peminjaman sehingga tidak dapat dihapus permanen demi menjaga keutuhan data laporan dan riwayat anggota. Gunakan fitur Arsipkan Buku untuk menyembunyikannya dari katalog pengunjung.",
+              code: "BOOK_HAS_LOAN_HISTORY",
+              canArchive: true
+            }
+          };
+        }
+        const { data: deletedRows, error: deleteErr } = await supabaseAdmin.from("books").delete().eq("id", bookId).select("id");
+        if (deleteErr) {
+          const permDenied = isDbPermissionDeniedError(deleteErr);
+          if (String(deleteErr.code || "") === "23503") {
+            return {
+              status: 409,
+              payload: {
+                error: "Buku ini masih dirujuk oleh data transaksi peminjaman sehingga tidak dapat dihapus permanen. Gunakan fitur Arsipkan Buku agar riwayat peminjaman tetap terjaga.",
+                code: "BOOK_HAS_LOAN_HISTORY",
+                canArchive: true
+              }
+            };
+          }
+          return {
+            status: 500,
+            payload: {
+              error: `Gagal menghapus buku: ${deleteErr.message}`,
+              code: permDenied ? "DB_PERMISSION_DENIED" : deleteErr.code || "BOOK_DELETE_FAILED"
+            }
+          };
+        }
+        if (!deletedRows || deletedRows.length === 0) {
+          return {
+            status: 404,
+            payload: {
+              error: "Buku tidak ditemukan atau gagal dihapus dari database.",
+              code: "BOOK_NOT_FOUND"
+            }
+          };
+        }
+        try {
+          await supabaseAdmin.from("activity_logs").insert({
+            actor_id: authCheck.adminProfile.id,
+            action: "delete_book",
+            entity_type: "books",
+            entity_id: bookId,
+            details: JSON.stringify({ title: existingBook.title }),
+            created_at: (/* @__PURE__ */ new Date()).toISOString()
+          });
+        } catch {
+        }
+        return {
+          status: 200,
+          payload: {
+            success: true,
+            deletedBookId: bookId,
+            storageFilesPreserved: Boolean(existingBook.cover_path || existingBook.file_path)
+          }
+        };
+      });
+      return res.status(result.status).json(result.payload);
     } catch (err) {
       return res.status(500).json({
         error: err?.message || "Terjadi kesalahan server saat menghapus buku."

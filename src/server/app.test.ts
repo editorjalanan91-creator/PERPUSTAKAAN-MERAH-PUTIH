@@ -98,6 +98,8 @@ function createMockSupabaseAdmin(options?: {
   simulateLoansPermissionDenied?: boolean | 'update';
   simulateBookStockUpdateFailure?: boolean | 'zero_rows';
   simulateLoanUpdateDelayMs?: number;
+  simulateBookDeleteFkConflict?: boolean;
+  simulateBookDeleteZeroRows?: boolean;
   rpcHandler?: (fnName: string, params?: Record<string, any>) => Promise<{ data: any; error: any }>;
   simulateRollbackFailures?: {
     profile?: boolean | 'throw';
@@ -583,11 +585,29 @@ function createMockSupabaseAdmin(options?: {
               deletedProfiles.push(idFilter);
             }
           } else if (table === 'books') {
+            if (options?.simulateBookDeleteFkConflict) {
+              return Promise.resolve({
+                data: null,
+                error: {
+                  code: '23503',
+                  message:
+                    'update or delete on table "books" violates foreign key constraint "loans_book_id_fkey" on table "loans"',
+                },
+              });
+            }
+            if (options?.simulateBookDeleteZeroRows) {
+              return Promise.resolve({ data: [], error: null });
+            }
             const idFilter = eqFilters.find((f) => f.col === 'id')?.val;
+            const removed: any[] = [];
             if (idFilter) {
               const idx = books.findIndex((b) => b.id === idFilter);
-              if (idx !== -1) books.splice(idx, 1);
+              if (idx !== -1) {
+                removed.push({ ...books[idx] });
+                books.splice(idx, 1);
+              }
             }
+            return Promise.resolve({ data: removed, error: null });
           } else if (table === 'categories') {
             categoriesTouches.push('delete');
           } else if (table === 'activity_logs') {
@@ -598,7 +618,7 @@ function createMockSupabaseAdmin(options?: {
               }
             }
           }
-          return Promise.resolve({ error: null });
+          return Promise.resolve({ data: [], error: null });
         }
 
         if (isUpdate) {
@@ -3302,4 +3322,285 @@ test('POST /api/loans/:id/approve and /return use atomic PostgreSQL RPCs when av
     assert.equal(body.loan.due_at, null);
     assert.equal(fallbackMock.books.find((b) => b.id === BOOK_MAIN_ID)?.available_copies, 1);
   });
+});
+
+test('Book collection management: free delete, active/historical loan rejection (409), archive/restore sync, visitor forbidden, NULL flag consistency, and edit stock integrity', async () => {
+  const FREE_BOOK_ID = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbb10';
+  const HISTORY_BOOK_ID = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbb11';
+  const NULL_FLAGS_BOOK_ID = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbb12';
+  const UNPUBLISHED_BOOK_ID = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbb13';
+
+  const mock = createMockSupabaseAdmin();
+  mock.books.push(
+    {
+      id: FREE_BOOK_ID,
+      title: 'Buku Bebas Peminjaman',
+      author: 'Penulis Bebas',
+      cover_path: 'covers/bebas.jpg',
+      file_path: 'documents/bebas.pdf',
+      category_id: 'cat-1',
+      is_published: true,
+      is_archived: false,
+      total_copies: 3,
+      available_copies: 3,
+      created_by: ADMIN_ID,
+      created_at: '2026-11-19T08:00:00.000Z',
+    },
+    {
+      id: HISTORY_BOOK_ID,
+      title: 'Buku Dengan Riwayat Returned',
+      author: 'Penulis Sejarah',
+      cover_path: null,
+      category_id: 'cat-1',
+      is_published: true,
+      is_archived: false,
+      total_copies: 4,
+      available_copies: 4,
+      created_by: ADMIN_ID,
+      created_at: '2026-11-19T09:00:00.000Z',
+    },
+    {
+      id: NULL_FLAGS_BOOK_ID,
+      title: 'Buku Legacy Null Flags',
+      author: 'Penulis Legacy',
+      cover_path: null,
+      category_id: 'cat-1',
+      is_published: null as any,
+      is_archived: null as any,
+      total_copies: 2,
+      available_copies: 2,
+      created_by: ADMIN_ID,
+      created_at: '2026-11-19T10:00:00.000Z',
+    },
+    {
+      id: UNPUBLISHED_BOOK_ID,
+      title: 'Buku Draft Tersembunyi',
+      author: 'Penulis Draft',
+      cover_path: null,
+      category_id: 'cat-1',
+      is_published: false,
+      is_archived: false,
+      total_copies: 2,
+      available_copies: 2,
+      created_by: ADMIN_ID,
+      created_at: '2026-11-19T11:00:00.000Z',
+    }
+  );
+
+  mock.loans.push({
+    id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa99',
+    user_id: VISITOR_WITH_LOANS_ID,
+    book_id: HISTORY_BOOK_ID,
+    status: 'returned',
+    requested_at: '2026-11-10T08:00:00.000Z',
+    approved_at: '2026-11-10T09:00:00.000Z',
+    due_at: null,
+    returned_at: '2026-11-12T10:00:00.000Z',
+    admin_note: null,
+    created_at: '2026-11-10T08:00:00.000Z',
+    updated_at: '2026-11-12T10:00:00.000Z',
+  });
+
+  await withServer(mock, async (baseUrl) => {
+    // 1. Konsistensi katalog Pengunjung vs Admin (NULL flags tampil, is_published=false tersembunyi)
+    const initialVisitorRes = await fetch(`${baseUrl}/api/books`, {
+      headers: { Authorization: 'Bearer visitor-token' },
+    });
+    assert.equal(initialVisitorRes.status, 200);
+    const initialVisitorBooks = (await initialVisitorRes.json()).books;
+    assert.equal(initialVisitorBooks.some((b: any) => b.id === NULL_FLAGS_BOOK_ID), true);
+    assert.equal(initialVisitorBooks.some((b: any) => b.id === UNPUBLISHED_BOOK_ID), false);
+    assert.equal(initialVisitorBooks.some((b: any) => b.id === FREE_BOOK_ID), true);
+
+    // 2. Pengunjung dilarang menghapus, mengubah, mengarsipkan, atau menambah buku (403)
+    for (const attempt of [
+      fetch(`${baseUrl}/api/admin/books/${FREE_BOOK_ID}`, {
+        method: 'DELETE',
+        headers: { Authorization: 'Bearer visitor-token' },
+      }),
+      fetch(`${baseUrl}/api/admin/books/${FREE_BOOK_ID}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer visitor-token' },
+        body: JSON.stringify({ is_archived: true }),
+      }),
+    ]) {
+      const forbiddenRes = await attempt;
+      assert.equal(forbiddenRes.status, 403);
+    }
+
+    // 3. Hapus buku yang memiliki riwayat peminjaman historis ('returned') ditolak 409 & diarahkan ke arsip
+    const delHistoryRes = await fetch(`${baseUrl}/api/admin/books/${HISTORY_BOOK_ID}`, {
+      method: 'DELETE',
+      headers: { Authorization: 'Bearer admin-token' },
+    });
+    assert.equal(delHistoryRes.status, 409);
+    const delHistoryBody = await delHistoryRes.json();
+    assert.equal(delHistoryBody.code, 'BOOK_HAS_LOAN_HISTORY');
+    assert.equal(delHistoryBody.canArchive, true);
+    assert.equal(mock.books.some((b) => b.id === HISTORY_BOOK_ID), true);
+    assert.equal(mock.loans.some((l) => l.book_id === HISTORY_BOOK_ID), true);
+
+    // 4. Hapus buku dengan pinjaman aktif ditolak 409 BOOK_HAS_ACTIVE_LOANS
+    const delActiveRes = await fetch(`${baseUrl}/api/admin/books/${BOOK_MAIN_ID}`, {
+      method: 'DELETE',
+      headers: { Authorization: 'Bearer admin-token' },
+    });
+    assert.equal(delActiveRes.status, 409);
+    assert.equal((await delActiveRes.json()).code, 'BOOK_HAS_ACTIVE_LOANS');
+
+    // 5. Admin mengarsipkan buku yang memiliki riwayat -> berhasil, loans tetap utuh, tersembunyi dari Pengunjung
+    const archiveRes = await fetch(`${baseUrl}/api/admin/books/${HISTORY_BOOK_ID}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer admin-token' },
+      body: JSON.stringify({ is_archived: true }),
+    });
+    assert.equal(archiveRes.status, 200);
+    assert.equal((await archiveRes.json()).book.is_archived, true);
+
+    const visitorAfterArchive = await (
+      await fetch(`${baseUrl}/api/books`, { headers: { Authorization: 'Bearer visitor-token' } })
+    ).json();
+    assert.equal(visitorAfterArchive.books.some((b: any) => b.id === HISTORY_BOOK_ID), false);
+
+    const adminAfterArchive = await (
+      await fetch(`${baseUrl}/api/books`, { headers: { Authorization: 'Bearer admin-token' } })
+    ).json();
+    assert.equal(adminAfterArchive.books.some((b: any) => b.id === HISTORY_BOOK_ID), true);
+    assert.equal(mock.loans.some((l) => l.book_id === HISTORY_BOOK_ID), true);
+
+    // 6. Admin memulihkan buku dari arsip -> muncul kembali di katalog Pengunjung
+    const restoreRes = await fetch(`${baseUrl}/api/admin/books/${HISTORY_BOOK_ID}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer admin-token' },
+      body: JSON.stringify({ is_archived: false }),
+    });
+    assert.equal(restoreRes.status, 200);
+    const visitorAfterRestore = await (
+      await fetch(`${baseUrl}/api/books`, { headers: { Authorization: 'Bearer visitor-token' } })
+    ).json();
+    assert.equal(visitorAfterRestore.books.some((b: any) => b.id === HISTORY_BOOK_ID), true);
+
+    // 7. Super Admin dapat menambah & mengedit buku (termasuk validasi stok terhadap pinjaman aktif)
+    const createRes = await fetch(`${baseUrl}/api/admin/books`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer super-admin-token' },
+      body: JSON.stringify({
+        title: 'Buku Baru Terintegrasi',
+        author: 'Tim Pustaka',
+        category_id: 'cat-1',
+        total_copies: 5,
+      }),
+    });
+    assert.equal(createRes.status, 201);
+    const createdBook = (await createRes.json()).book;
+
+    const editRes = await fetch(`${baseUrl}/api/admin/books/${createdBook.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer admin-token' },
+      body: JSON.stringify({ title: 'Buku Baru Terintegrasi Rev 2', total_copies: 8 }),
+    });
+    assert.equal(editRes.status, 200);
+    const editedBook = (await editRes.json()).book;
+    assert.equal(editedBook.title, 'Buku Baru Terintegrasi Rev 2');
+    assert.equal(editedBook.total_copies, 8);
+    assert.equal(editedBook.available_copies, 8);
+
+    // Penurunan total_copies di bawah eksemplar sedang dipinjam pada BOOK_MAIN_ID (total=5, available=2 -> 3 dipinjam) ditolak
+    const badStockRes = await fetch(`${baseUrl}/api/admin/books/${BOOK_MAIN_ID}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer admin-token' },
+      body: JSON.stringify({ total_copies: 2 }),
+    });
+    assert.equal(badStockRes.status, 400);
+    assert.equal((await badStockRes.json()).code, 'INVALID_BOOK_STOCK');
+
+    // 8. Hapus buku tanpa riwayat peminjaman berhasil & hilang dari Admin maupun Pengunjung
+    const delFreeRes = await fetch(`${baseUrl}/api/admin/books/${FREE_BOOK_ID}`, {
+      method: 'DELETE',
+      headers: { Authorization: 'Bearer admin-token' },
+    });
+    assert.equal(delFreeRes.status, 200);
+    const delFreeBody = await delFreeRes.json();
+    assert.equal(delFreeBody.success, true);
+    assert.equal(delFreeBody.storageFilesPreserved, true);
+
+    const [visitorFinal, adminFinal] = await Promise.all([
+      (await fetch(`${baseUrl}/api/books`, { headers: { Authorization: 'Bearer visitor-token' } })).json(),
+      (await fetch(`${baseUrl}/api/books`, { headers: { Authorization: 'Bearer admin-token' } })).json(),
+    ]);
+    assert.equal(visitorFinal.books.some((b: any) => b.id === FREE_BOOK_ID), false);
+    assert.equal(adminFinal.books.some((b: any) => b.id === FREE_BOOK_ID), false);
+    assert.equal(visitorFinal.books.some((b: any) => b.id === createdBook.id), true);
+
+    // 9. Hapus buku yang sudah tidak ada mengembalikan 404 BOOK_NOT_FOUND
+    const delMissingRes = await fetch(`${baseUrl}/api/admin/books/${FREE_BOOK_ID}`, {
+      method: 'DELETE',
+      headers: { Authorization: 'Bearer admin-token' },
+    });
+    assert.equal(delMissingRes.status, 404);
+    assert.equal((await delMissingRes.json()).code, 'BOOK_NOT_FOUND');
+  });
+
+  // 10. DB FK 23503 & zero-row delete protection
+  const fkMock = createMockSupabaseAdmin({ simulateBookDeleteFkConflict: true });
+  await withServer(fkMock, async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/api/admin/books/book-1`, {
+      method: 'DELETE',
+      headers: { Authorization: 'Bearer admin-token' },
+    });
+    assert.equal(res.status, 400);
+  });
+
+  const FREE_UUID = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbb20';
+  const fkUuidMock = createMockSupabaseAdmin({ simulateBookDeleteFkConflict: true });
+  fkUuidMock.books.push({
+    id: FREE_UUID,
+    title: 'Buku FK DB',
+    author: 'Penulis',
+    cover_path: null,
+    category_id: 'cat-1',
+    is_published: true,
+    is_archived: false,
+    total_copies: 1,
+    available_copies: 1,
+    created_by: ADMIN_ID,
+  });
+  await withServer(fkUuidMock, async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/api/admin/books/${FREE_UUID}`, {
+      method: 'DELETE',
+      headers: { Authorization: 'Bearer admin-token' },
+    });
+    assert.equal(res.status, 409);
+    const body = await res.json();
+    assert.equal(body.code, 'BOOK_HAS_LOAN_HISTORY');
+    assert.equal(fkUuidMock.books.some((b) => b.id === FREE_UUID), true);
+  });
+
+  const zeroRowMock = createMockSupabaseAdmin({ simulateBookDeleteZeroRows: true });
+  zeroRowMock.books.push({
+    id: FREE_UUID,
+    title: 'Buku Zero Row',
+    author: 'Penulis',
+    cover_path: null,
+    category_id: 'cat-1',
+    is_published: true,
+    is_archived: false,
+    total_copies: 1,
+    available_copies: 1,
+    created_by: ADMIN_ID,
+  });
+  await withServer(zeroRowMock, async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/api/admin/books/${FREE_UUID}`, {
+      method: 'DELETE',
+      headers: { Authorization: 'Bearer admin-token' },
+    });
+    assert.equal(res.status, 404);
+    assert.equal((await res.json()).code, 'BOOK_NOT_FOUND');
+  });
+});
+
+test('libraryService never falls back to direct browser supabase.from("books") insert/update/delete', async () => {
+  const fs = await import('node:fs');
+  const src = fs.readFileSync('src/services/libraryService.ts', 'utf8');
+  assert.equal(/supabase\.from\(['"]books['"]\)\.(insert|update|delete)/.test(src), false);
 });

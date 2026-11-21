@@ -40,13 +40,12 @@ export const libraryService = {
       throw error;
     }
 
-    // Hitung jumlah buku per kategori secara non-blocking agar kendala RLS pada tabel lain tidak menggagalkan daftar kategori
-    let books: Array<{ category_id?: string | null }> | null = null;
+    // Hitung jumlah buku aktif per kategori secara non-blocking
+    let books: Array<{ category_id?: string | null; is_archived?: boolean | null }> | null = null;
     try {
       const { data } = await supabase
         .from('books')
-        .select('category_id')
-        .eq('is_archived', false);
+        .select('category_id, is_archived');
       books = data;
     } catch {
       books = null;
@@ -55,7 +54,7 @@ export const libraryService = {
     const countMap: Record<string, number> = {};
     if (books) {
       for (const b of books) {
-        if (b.category_id) {
+        if (b.category_id && !b.is_archived) {
           countMap[b.category_id] = (countMap[b.category_id] || 0) + 1;
         }
       }
@@ -169,21 +168,20 @@ export const libraryService = {
   },
 
   async deleteCategory(id: string, userId?: string): Promise<void> {
-    // Periksa buku terkait melalui backend terverifikasi terlebih dahulu
+    // Periksa seluruh buku terkait (termasuk yang diarsipkan) melalui backend terverifikasi
     const booksFromApi = await this.getBooks(true).catch(() => null);
     if (booksFromApi) {
-      const usedCount = booksFromApi.filter((b) => b.category_id === id && !b.is_archived).length;
+      const usedCount = booksFromApi.filter((b) => b.category_id === id).length;
       if (usedCount > 0) {
         throw new Error(
-          `Kategori ini masih digunakan oleh ${usedCount} buku. Pindahkan kategori buku tersebut terlebih dahulu.`
+          `Kategori ini masih digunakan oleh ${usedCount} buku (termasuk buku arsip). Pindahkan kategori buku tersebut terlebih dahulu.`
         );
       }
     } else {
       const { data: books } = await supabase
         .from('books')
         .select('id')
-        .eq('category_id', id)
-        .eq('is_archived', false);
+        .eq('category_id', id);
 
       if (books && books.length > 0) {
         throw new Error(
@@ -232,7 +230,7 @@ export const libraryService = {
       }
     }
 
-    let query = supabase
+    const { data, error } = await supabase
       .from('books')
       .select(`
         *,
@@ -244,28 +242,28 @@ export const libraryService = {
       `)
       .order('created_at', { ascending: false });
 
-    // Jika pengunjung, hanya tampilkan buku yang dipublikasikan dan tidak diarsipkan
-    if (!isAdmin) {
-      query = query.eq('is_published', true).eq('is_archived', false);
-    }
-
-    const { data, error } = await query;
     if (error) {
       console.error('Error fetching books:', error);
       throw error;
     }
 
-    return (data || []).map((b) => ({
+    const filtered = (data || []).filter((b: any) =>
+      isAdmin ? true : b.is_published !== false && !b.is_archived
+    );
+
+    return filtered.map((b: any) => ({
       ...b,
+      is_published: b.is_published !== false,
+      is_archived: Boolean(b.is_archived),
       category_name: b.category?.name || 'Tanpa Kategori',
     }));
   },
 
   async addBook(
     bookData: Partial<Book> & { title: string },
-    userId?: string
+    _userId?: string
   ): Promise<Book> {
-    const totalCopies = Math.max(1, Math.floor(Number(bookData.total_copies || bookData.stock || 1) || 1));
+    const totalCopies = Math.max(1, Math.floor(Number(bookData.total_copies ?? bookData.stock ?? 1) || 1));
     const rawAvailable =
       bookData.available_copies !== undefined ? Number(bookData.available_copies) : totalCopies;
     const availableCopies = Math.max(
@@ -285,6 +283,7 @@ export const libraryService = {
 
     const response = await fetch('/api/admin/books', {
       method: 'POST',
+      cache: 'no-store',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${token}`,
@@ -303,67 +302,25 @@ export const libraryService = {
       const saved = payload.book as Book;
       return {
         ...saved,
+        is_published: saved.is_published !== false,
+        is_archived: Boolean(saved.is_archived),
         category_name: saved.category?.name || saved.category_name || 'Tanpa Kategori',
       };
     }
-    if (response.status !== 404 || isJson) {
-      throw buildApiError(
-        `Gagal menambahkan buku baru (HTTP ${response.status}).`,
-        payload,
-        response.status
-      );
-    }
 
-    const { data: insertedRows, error } = await supabase
-      .from('books')
-      .insert({
-        title: bookData.title.trim(),
-        author: (bookData.author || 'Penulis Mandiri').trim(),
-        publisher: (bookData.publisher || 'Penerbit Mandiri').trim(),
-        publication_year: bookData.publication_year || bookData.year || new Date().getFullYear(),
-        isbn: (bookData.isbn || 'ISBN-978-000-000').trim(),
-        category_id: cleanCategoryId,
-        description: bookData.description ? bookData.description.trim() : null,
-        cover_path: bookData.cover_path || bookData.coverUrl || null,
-        file_path: bookData.file_path || null,
-        file_type: bookData.file_type || null,
-        total_copies: totalCopies,
-        available_copies: availableCopies,
-        is_published: bookData.is_published !== undefined ? bookData.is_published : true,
-        is_archived: false,
-        created_by: userId || null,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      })
-      .select(`
-        *,
-        category:categories (
-          id,
-          name,
-          slug
-        )
-      `);
-
-    if (error) throw error;
-    const data = insertedRows?.[0];
-    if (!data) {
-      throw new Error('Buku gagal ditambahkan ke database.');
-    }
-
-    if (userId) {
-      await recordActivityLog(userId, 'create_book', 'books', data.id, { title: bookData.title });
-    }
-
-    return {
-      ...data,
-      category_name: data.category?.name || 'Tanpa Kategori',
-    };
+    throw buildApiError(
+      !isJson && response.status === 404
+        ? 'Endpoint backend manajemen buku tidak tersedia. Pastikan layanan server aktif.'
+        : `Gagal menambahkan buku baru (HTTP ${response.status}).`,
+      payload,
+      response.status
+    );
   },
 
   async updateBook(
     id: string,
     updates: Partial<Book>,
-    userId?: string
+    _userId?: string
   ): Promise<Book> {
     const cleanId = String(id || '').trim();
     if (!cleanId) {
@@ -377,6 +334,7 @@ export const libraryService = {
 
     const response = await fetch(`/api/admin/books/${encodeURIComponent(cleanId)}`, {
       method: 'PATCH',
+      cache: 'no-store',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${token}`,
@@ -389,50 +347,22 @@ export const libraryService = {
       const updated = payload.book as Book;
       return {
         ...updated,
+        is_published: updated.is_published !== false,
+        is_archived: Boolean(updated.is_archived),
         category_name: updated.category?.name || updated.category_name || 'Tanpa Kategori',
       };
     }
-    if (response.status !== 404 || isJson) {
-      throw buildApiError(
-        `Gagal memperbarui data buku (HTTP ${response.status}).`,
-        payload,
-        response.status
-      );
-    }
 
-    const { category, category_name, ...cleanUpdates } = updates as any;
-    cleanUpdates.updated_at = new Date().toISOString();
-
-    const { data: updatedRows, error } = await supabase
-      .from('books')
-      .update(cleanUpdates)
-      .eq('id', cleanId)
-      .select(`
-        *,
-        category:categories (
-          id,
-          name,
-          slug
-        )
-      `);
-
-    if (error) throw error;
-    const data = updatedRows?.[0];
-    if (!data) {
-      throw new Error('Data buku tidak ditemukan atau tidak memiliki izin untuk memperbarui.');
-    }
-
-    if (userId) {
-      await recordActivityLog(userId, 'update_book', 'books', cleanId, { title: data.title });
-    }
-
-    return {
-      ...data,
-      category_name: data.category?.name || 'Tanpa Kategori',
-    };
+    throw buildApiError(
+      !isJson && response.status === 404
+        ? 'Endpoint backend manajemen buku tidak tersedia. Pastikan layanan server aktif.'
+        : `Gagal memperbarui data buku (HTTP ${response.status}).`,
+      payload,
+      response.status
+    );
   },
 
-  async deleteBook(id: string, userId?: string): Promise<void> {
+  async deleteBook(id: string, _userId?: string): Promise<void> {
     const cleanId = String(id || '').trim();
     if (!cleanId) {
       throw new Error('ID buku tidak valid.');
@@ -445,6 +375,7 @@ export const libraryService = {
 
     const response = await fetch(`/api/admin/books/${encodeURIComponent(cleanId)}`, {
       method: 'DELETE',
+      cache: 'no-store',
       headers: {
         Authorization: `Bearer ${token}`,
       },
@@ -454,31 +385,14 @@ export const libraryService = {
     if (response.ok) {
       return;
     }
-    if (response.status !== 404 || isJson) {
-      throw buildApiError(
-        `Gagal menghapus buku (HTTP ${response.status}).`,
-        payload,
-        response.status
-      );
-    }
 
-    // Fallback statis tanpa backend
-    const { data: activeLoans } = await supabase
-      .from('loans')
-      .select('id')
-      .eq('book_id', cleanId)
-      .in('status', ['pending', 'approved', 'borrowed']);
-
-    if (activeLoans && activeLoans.length > 0) {
-      throw new Error('Buku ini tidak dapat dihapus karena masih memiliki transaksi peminjaman aktif.');
-    }
-
-    const { error } = await supabase.from('books').delete().eq('id', cleanId);
-    if (error) throw error;
-
-    if (userId) {
-      await recordActivityLog(userId, 'delete_book', 'books', cleanId);
-    }
+    throw buildApiError(
+      !isJson && response.status === 404
+        ? 'Endpoint backend penghapusan buku tidak tersedia. Pastikan layanan server aktif.'
+        : `Gagal menghapus buku (HTTP ${response.status}).`,
+      payload,
+      response.status
+    );
   },
 
   async toggleArchiveBook(id: string, isArchived: boolean, userId?: string): Promise<Book> {

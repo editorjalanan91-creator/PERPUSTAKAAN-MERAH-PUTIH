@@ -72,10 +72,12 @@ export const AdminBooksView: React.FC<AdminBooksViewProps> = ({
 
   const [formData, setFormData] = useState(initialFormState);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [archivingBookId, setArchivingBookId] = useState<string | null>(null);
   const [uploadingCover, setUploadingCover] = useState(false);
   const [uploadingDoc, setUploadingDoc] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [deleteErrorCode, setDeleteErrorCode] = useState<string | null>(null);
 
   // Reset state modal saat ditutup dari luar atau saat dibuka melalui pintasan sidebar/dashboard
   useEffect(() => {
@@ -91,17 +93,18 @@ export const AdminBooksView: React.FC<AdminBooksViewProps> = ({
   }, [isAddModalOpen, editingBook, categories]);
 
   const filteredBooks = useMemo(() => {
+    const q = searchQuery.toLowerCase();
     return books.filter((b) => {
       const matchCat =
         selectedCategory === 'Semua' ||
         (b.category_name || '').toLowerCase() === selectedCategory.toLowerCase() ||
         b.category_id === selectedCategory;
       const matchQuery =
-        !searchQuery ||
-        b.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        b.author.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        b.isbn.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        (b.publisher || '').toLowerCase().includes(searchQuery.toLowerCase());
+        !q ||
+        (b.title || '').toLowerCase().includes(q) ||
+        (b.author || '').toLowerCase().includes(q) ||
+        (b.isbn || '').toLowerCase().includes(q) ||
+        (b.publisher || '').toLowerCase().includes(q);
       return matchCat && matchQuery;
     });
   }, [books, searchQuery, selectedCategory]);
@@ -119,18 +122,18 @@ export const AdminBooksView: React.FC<AdminBooksViewProps> = ({
   const openEditModal = (book: Book) => {
     setEditingBook(book);
     setFormData({
-      title: book.title,
-      author: book.author,
-      publisher: book.publisher,
-      publication_year: book.publication_year,
-      isbn: book.isbn,
-      category_id: book.category_id,
+      title: book.title || '',
+      author: book.author || '',
+      publisher: book.publisher || '',
+      publication_year: book.publication_year || new Date().getFullYear(),
+      isbn: book.isbn || '',
+      category_id: book.category_id || categories[0]?.id || '',
       description: book.description || '',
       cover_path: book.cover_path || '',
       file_path: book.file_path || '',
       file_type: book.file_type || 'pdf',
-      total_copies: book.total_copies,
-      is_published: book.is_published,
+      total_copies: book.total_copies || 1,
+      is_published: book.is_published !== false,
     });
     setFormError(null);
     setAddModalOpen(true);
@@ -186,6 +189,7 @@ export const AdminBooksView: React.FC<AdminBooksViewProps> = ({
 
   const handleFormSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
     const formValidation = validateBookFormInput(formData);
     if (!formValidation.valid) {
       setFormError(formValidation.error || 'Periksa kembali data formulir buku.');
@@ -231,18 +235,47 @@ export const AdminBooksView: React.FC<AdminBooksViewProps> = ({
     }
   };
 
+  const handleToggleArchiveClick = async (book: Book) => {
+    if (!onToggleArchive || archivingBookId === book.id) return;
+    setArchivingBookId(book.id);
+    try {
+      await onToggleArchive(book.id, !book.is_archived);
+    } catch {
+      // Toast error sudah ditangani oleh parent handler
+    } finally {
+      setArchivingBookId(null);
+    }
+  };
+
   const handleDeleteConfirm = async () => {
-    if (!deletingBook) return;
+    if (!deletingBook || isSubmitting) return;
     setIsSubmitting(true);
     setDeleteError(null);
+    setDeleteErrorCode(null);
     try {
       await onDeleteBook(deletingBook.id);
       setDeletingBook(null);
     } catch (err: any) {
+      setDeleteErrorCode(err?.code || null);
       setDeleteError(
         err?.message ||
           'Gagal menghapus buku. Jika buku memiliki riwayat peminjaman, gunakan fitur Arsipkan Buku.'
       );
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleArchiveFromDeleteModal = async () => {
+    if (!deletingBook || !onToggleArchive || isSubmitting) return;
+    setIsSubmitting(true);
+    setDeleteError(null);
+    try {
+      await onToggleArchive(deletingBook.id, true);
+      setDeleteErrorCode(null);
+      setDeletingBook(null);
+    } catch (err: any) {
+      setDeleteError(err?.message || 'Gagal mengarsipkan buku.');
     } finally {
       setIsSubmitting(false);
     }
@@ -399,6 +432,10 @@ export const AdminBooksView: React.FC<AdminBooksViewProps> = ({
                           <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-slate-200 text-slate-700">
                             Diarsipkan
                           </span>
+                        ) : book.is_published === false ? (
+                          <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-amber-100 text-amber-800">
+                            Disembunyikan
+                          </span>
                         ) : (
                           <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-100 text-emerald-800">
                             Aktif
@@ -418,8 +455,9 @@ export const AdminBooksView: React.FC<AdminBooksViewProps> = ({
                         {onToggleArchive && (
                           <button
                             type="button"
-                            onClick={() => onToggleArchive(book.id, !book.is_archived)}
-                            className="p-1.5 rounded-lg text-slate-600 hover:text-amber-800 hover:bg-slate-100 transition-colors cursor-pointer"
+                            disabled={archivingBookId === book.id}
+                            onClick={() => handleToggleArchiveClick(book)}
+                            className="p-1.5 rounded-lg text-slate-600 hover:text-amber-800 hover:bg-slate-100 transition-colors cursor-pointer disabled:opacity-50"
                             title={book.is_archived ? 'Pulihkan dari Arsip' : 'Arsipkan Buku'}
                             aria-label={book.is_archived ? `Pulihkan ${book.title} dari arsip` : `Arsipkan buku ${book.title}`}
                           >
@@ -434,6 +472,7 @@ export const AdminBooksView: React.FC<AdminBooksViewProps> = ({
                           type="button"
                           onClick={() => {
                             setDeleteError(null);
+                            setDeleteErrorCode(null);
                             setDeletingBook(book);
                           }}
                           className="p-1.5 rounded-lg text-slate-600 hover:text-rose-600 hover:bg-rose-50 transition-colors cursor-pointer"
@@ -641,6 +680,19 @@ export const AdminBooksView: React.FC<AdminBooksViewProps> = ({
                     </div>
                   </div>
                 </div>
+
+                <div className="sm:col-span-2 flex items-center gap-2.5 p-3 rounded-xl bg-slate-50 border border-slate-200">
+                  <input
+                    id="book-is-published"
+                    type="checkbox"
+                    checked={formData.is_published !== false}
+                    onChange={(e) => setFormData({ ...formData, is_published: e.target.checked })}
+                    className="w-4 h-4 rounded border-slate-300 text-blue-900 focus:ring-blue-900/30 cursor-pointer"
+                  />
+                  <label htmlFor="book-is-published" className="text-xs font-medium text-slate-700 cursor-pointer">
+                    Publikasikan di Katalog Pengunjung (jika tidak dicentang, buku hanya terlihat oleh Admin)
+                  </label>
+                </div>
               </div>
 
               <div className="pt-4 border-t border-slate-200 flex items-center justify-end gap-2">
@@ -674,7 +726,7 @@ export const AdminBooksView: React.FC<AdminBooksViewProps> = ({
             <div>
               <h3 className="text-base font-bold text-slate-900">Hapus Koleksi Buku?</h3>
               <p className="text-xs text-slate-500 mt-1">
-                Apakah Anda yakin ingin menghapus buku <strong>"{deletingBook.title}"</strong> dari database? Tindakan ini tidak dapat dibatalkan.
+                Apakah Anda yakin ingin menghapus permanen buku <strong>"{deletingBook.title}"</strong> dari database? Tindakan ini tidak dapat dibatalkan.
               </p>
             </div>
             {deleteError && (
@@ -683,22 +735,38 @@ export const AdminBooksView: React.FC<AdminBooksViewProps> = ({
                 <span>{deleteError}</span>
               </div>
             )}
-            <div className="flex gap-2 justify-center pt-2">
+            <div className="flex flex-wrap gap-2 justify-center pt-2">
               <button
                 type="button"
                 onClick={() => {
                   setDeleteError(null);
+                  setDeleteErrorCode(null);
                   setDeletingBook(null);
                 }}
-                className="px-4 py-2 rounded-xl bg-slate-100 text-slate-700 font-semibold text-xs cursor-pointer"
+                disabled={isSubmitting}
+                className="px-4 py-2 rounded-xl bg-slate-100 text-slate-700 font-semibold text-xs cursor-pointer disabled:opacity-50"
               >
                 Batal
               </button>
+              {deleteError &&
+                (deleteErrorCode === 'BOOK_HAS_LOAN_HISTORY' || deleteErrorCode === 'BOOK_HAS_ACTIVE_LOANS') &&
+                !deletingBook.is_archived &&
+                onToggleArchive && (
+                  <button
+                    type="button"
+                    onClick={handleArchiveFromDeleteModal}
+                    disabled={isSubmitting}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold text-xs cursor-pointer disabled:opacity-50"
+                  >
+                    <Archive className="w-3.5 h-3.5" />
+                    <span>{isSubmitting ? 'Mengarsipkan...' : 'Arsipkan Buku'}</span>
+                  </button>
+                )}
               <button
                 type="button"
                 onClick={handleDeleteConfirm}
                 disabled={isSubmitting}
-                className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs cursor-pointer"
+                className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs cursor-pointer disabled:opacity-50"
               >
                 {isSubmitting ? 'Menghapus...' : 'Ya, Hapus Buku'}
               </button>

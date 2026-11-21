@@ -146,6 +146,20 @@ test('filterAndSortBooks - filters by query, category, availability and sorts', 
   const sortedYear = filterAndSortBooks(mockBooks, { sortBy: 'year-desc' });
   assert.equal(sortedYear[0].id, 'b2'); // 2014
   assert.equal(sortedYear[2].id, 'b3'); // 1980
+
+  // Null-safe search on legacy rows missing publisher/isbn
+  const legacyBooks = [
+    {
+      ...mockBooks[0],
+      id: 'b-legacy',
+      publisher: null as unknown as string,
+      isbn: null as unknown as string,
+      author: null as unknown as string,
+    },
+  ];
+  const nullSafeRes = filterAndSortBooks(legacyBooks, { query: 'Laskar' });
+  assert.equal(nullSafeRes.length, 1);
+  assert.equal(nullSafeRes[0].id, 'b-legacy');
 });
 
 test('aggregateMonthlyReport - calculates statistics correctly', () => {
