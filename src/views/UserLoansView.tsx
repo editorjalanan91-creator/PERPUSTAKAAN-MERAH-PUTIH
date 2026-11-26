@@ -1,9 +1,11 @@
 import React, { useState } from 'react';
 import { Loan } from '../types';
 import {
+  evaluateDigitalBookReadAccess,
   formatDateIndo,
   formatLoanStatusIndo,
 } from '../utils/libraryRules';
+import { resolveDocumentFileType } from '../utils/epubUtils';
 import { getBookCoverUrl } from '../services/supabaseClient';
 import { libraryService } from '../services/libraryService';
 import {
@@ -20,13 +22,13 @@ import {
   BookOpen,
   HelpCircle,
   XCircle,
-  ExternalLink,
 } from 'lucide-react';
 
 interface UserLoansViewProps {
   loans: Loan[];
   onReturnBook: (loanId: string) => Promise<void>;
   onNavigateToCatalog: () => void;
+  onOpenBookReader?: (bookId: string) => void;
   isReturning?: boolean;
 }
 
@@ -34,6 +36,7 @@ export const UserLoansView: React.FC<UserLoansViewProps> = ({
   loans,
   onReturnBook,
   onNavigateToCatalog,
+  onOpenBookReader,
   isReturning = false,
 }) => {
   const [filterStatus, setFilterStatus] = useState<'all' | 'pending' | 'approved' | 'returned'>('all');
@@ -42,7 +45,6 @@ export const UserLoansView: React.FC<UserLoansViewProps> = ({
   const [returningLoanId, setReturningLoanId] = useState<string | null>(null);
   const [confirmingReturnLoan, setConfirmingReturnLoan] = useState<Loan | null>(null);
   const [returnModalError, setReturnModalError] = useState<string | null>(null);
-  const [readyReaderLink, setReadyReaderLink] = useState<{ loanId: string; url: string } | null>(null);
   const [readerError, setReaderError] = useState<string | null>(null);
 
   const handleOpenReturnConfirm = (loan: Loan) => {
@@ -84,12 +86,22 @@ export const UserLoansView: React.FC<UserLoansViewProps> = ({
       setReaderError('Buku ini tidak memiliki lampiran berkas digital (koleksi fisik).');
       return;
     }
+    const readAccess = evaluateDigitalBookReadAccess(loan);
+    if (!readAccess.allowed) {
+      setReaderError(readAccess.message);
+      return;
+    }
     setReadingLoanId(loan.id);
     try {
-      const signedUrl = await libraryService.getBookDigitalReadUrl(loan.book_id, loan.book.file_path);
-      setReadyReaderLink({ loanId: loan.id, url: signedUrl });
+      await libraryService.getBookDigitalReadUrl(loan.book_id);
+      if (onOpenBookReader) {
+        onOpenBookReader(loan.book_id);
+      } else if (typeof window !== 'undefined') {
+        window.history.pushState({}, '', `/read/${encodeURIComponent(loan.book_id)}`);
+        window.dispatchEvent(new PopStateEvent('popstate'));
+      }
     } catch (err: any) {
-      setReaderError(err?.message || 'Terjadi kesalahan saat memuat berkas digital.');
+      setReaderError(err?.message || 'Terjadi kesalahan saat membuka pembaca buku digital.');
     } finally {
       setReadingLoanId(null);
     }
@@ -174,6 +186,8 @@ export const UserLoansView: React.FC<UserLoansViewProps> = ({
             const isReturned = loan.status === 'returned';
             const isRejected = loan.status === 'rejected';
             const isExpired = loan.status === 'expired';
+            const readAccess = evaluateDigitalBookReadAccess(loan);
+            const canReadDigital = isApproved && readAccess.allowed && Boolean(loan.book?.file_path);
 
             const coverUrl = getBookCoverUrl(loan.book?.cover_path);
             const bookTitle = loan.book?.title || 'Judul Buku';
@@ -208,10 +222,18 @@ export const UserLoansView: React.FC<UserLoansViewProps> = ({
                           Menunggu Persetujuan Admin
                         </span>
                       )}
-                      {isApproved && (
+                      {isApproved && readAccess.allowed && (
                         <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-blue-100 text-blue-900">
                           <CheckCircle2 className="w-3 h-3 text-blue-900" />
                           Disetujui (Dapat Dibaca)
+                        </span>
+                      )}
+                      {isApproved && !readAccess.allowed && (
+                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-rose-100 text-rose-800">
+                          <AlertTriangle className="w-3 h-3 text-rose-600" />
+                          {readAccess.code === 'LOAN_EXPIRED'
+                            ? 'Jatuh Tempo Terlewati'
+                            : 'Akses Baca Terkunci'}
                         </span>
                       )}
                       {isReturned && (
@@ -250,6 +272,12 @@ export const UserLoansView: React.FC<UserLoansViewProps> = ({
                           Disetujui: <strong className="text-slate-700">{formatDateIndo(loan.approved_at)}</strong>
                         </span>
                       )}
+                      {loan.due_at && (
+                        <span className="flex items-center gap-1">
+                          <Clock className="w-3.5 h-3.5 text-slate-400" />
+                          Jatuh Tempo: <strong className="text-slate-700">{formatDateIndo(loan.due_at)}</strong>
+                        </span>
+                      )}
                       {loan.returned_at && (
                         <span className="flex items-center gap-1 text-emerald-700 font-medium">
                           <CheckCircle2 className="w-3.5 h-3.5" />
@@ -270,9 +298,14 @@ export const UserLoansView: React.FC<UserLoansViewProps> = ({
                 {/* Actions */}
                 <div className="flex sm:flex-row md:flex-col items-center md:items-end justify-between w-full md:w-auto gap-3 pt-4 md:pt-0 border-t md:border-t-0 border-slate-100">
                   <div className="text-left md:text-right">
-                    {isApproved && (
+                    {isApproved && readAccess.allowed && (
                       <p className="text-xs font-semibold text-blue-900">
                         Aktif &amp; Dapat Dibaca
+                      </p>
+                    )}
+                    {isApproved && !readAccess.allowed && (
+                      <p className="text-xs font-semibold text-rose-700 max-w-xs">
+                        {readAccess.message}
                       </p>
                     )}
                     {isPending && (
@@ -283,30 +316,21 @@ export const UserLoansView: React.FC<UserLoansViewProps> = ({
                   </div>
 
                   <div className="flex items-center gap-2 flex-wrap justify-end">
-                    {/* Read Digital Book Button if approved */}
-                    {isApproved && loan.book?.file_path && (
-                      readyReaderLink?.loanId === loan.id ? (
-                        <a
-                          href={readyReaderLink.url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-blue-900 hover:bg-blue-950 text-white shadow-sm transition-all"
-                        >
-                          <BookOpen className="w-3.5 h-3.5 text-amber-400" />
-                          <span>Buka Dokumen</span>
-                          <ExternalLink className="w-3 h-3" />
-                        </a>
-                      ) : (
-                        <button
-                          type="button"
-                          disabled={readingLoanId === loan.id}
-                          onClick={() => handleOpenDigitalReader(loan)}
-                          className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-blue-900 hover:bg-blue-950 text-white shadow-sm transition-all cursor-pointer disabled:opacity-50"
-                        >
-                          <BookOpen className="w-3.5 h-3.5 text-amber-400" />
-                          <span>{readingLoanId === loan.id ? 'Menyiapkan...' : 'Baca Digital'}</span>
-                        </button>
-                      )
+                    {/* Read Digital Book Button if approved and due_at valid & unexpired */}
+                    {canReadDigital && loan.book?.file_path && (
+                      <button
+                        type="button"
+                        disabled={readingLoanId === loan.id}
+                        onClick={() => handleOpenDigitalReader(loan)}
+                        className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-blue-900 hover:bg-blue-950 text-white shadow-sm transition-all cursor-pointer disabled:opacity-50"
+                      >
+                        <BookOpen className="w-3.5 h-3.5 text-amber-400" />
+                        <span>
+                          {readingLoanId === loan.id
+                            ? 'Menyiapkan...'
+                            : `Baca ${resolveDocumentFileType(loan.book.file_type, loan.book.file_path).toUpperCase()}`}
+                        </span>
+                      </button>
                     )}
 
                     <button

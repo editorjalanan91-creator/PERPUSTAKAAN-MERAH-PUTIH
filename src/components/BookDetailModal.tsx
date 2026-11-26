@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { Book, Loan } from '../types';
 import { getBookCoverUrl } from '../services/supabaseClient';
 import { libraryService } from '../services/libraryService';
+import { evaluateDigitalBookReadAccess, formatDateIndo } from '../utils/libraryRules';
+import { resolveDocumentFileType } from '../utils/epubUtils';
 import {
   X,
   BookOpen,
@@ -13,7 +15,6 @@ import {
   Hash,
   Clock,
   FileText,
-  ExternalLink,
   ShieldCheck,
 } from 'lucide-react';
 
@@ -21,6 +22,7 @@ interface BookDetailModalProps {
   book: Book | null;
   onClose: () => void;
   onBorrow: (bookId: string, notes?: string) => Promise<void>;
+  onOpenReader?: (bookId: string) => void;
   isBorrowing?: boolean;
   userLoan?: Loan | null;
 }
@@ -29,19 +31,18 @@ export const BookDetailModal: React.FC<BookDetailModalProps> = ({
   book,
   onClose,
   onBorrow,
+  onOpenReader,
   isBorrowing = false,
   userLoan,
 }) => {
   const [notes, setNotes] = useState<string>('');
   const [imageError, setImageError] = useState<boolean>(false);
-  const [readingUrl, setReadingUrl] = useState<string | null>(null);
   const [isLoadingReader, setIsLoadingReader] = useState<boolean>(false);
   const [readerError, setReaderError] = useState<string | null>(null);
 
   useEffect(() => {
     setNotes('');
     setImageError(false);
-    setReadingUrl(null);
     setReaderError(null);
   }, [book?.id]);
 
@@ -49,16 +50,20 @@ export const BookDetailModal: React.FC<BookDetailModalProps> = ({
 
   const isAvailable = (book.available_copies ?? 0) > 0;
   const coverUrl = getBookCoverUrl(book.cover_path);
+  const resolvedFormat = book.file_path
+    ? resolveDocumentFileType(book.file_type, book.file_path).toUpperCase()
+    : 'Fisik';
 
-  // Periksa apakah pengunjung memiliki hak akses membaca (peminjaman approved / borrowed)
+  // Periksa apakah pengunjung memiliki hak akses membaca (status approved/borrowed + due_at valid & belum lewat)
   const isApprovedStatus = Boolean(
     userLoan && (userLoan.status === 'approved' || userLoan.status === 'borrowed')
   );
-  const isApprovedToRead = isApprovedStatus;
+  const readAccess = evaluateDigitalBookReadAccess(userLoan);
+  const isApprovedToRead = isApprovedStatus && readAccess.allowed;
 
   const isPending = userLoan && userLoan.status === 'pending';
 
-  // Ambil signed URL jika disetujui membaca
+  // Verifikasi akses lalu buka halaman pembaca internal /read/:bookId
   const handleOpenReader = async () => {
     setReaderError(null);
     if (!book.file_path) {
@@ -67,10 +72,15 @@ export const BookDetailModal: React.FC<BookDetailModalProps> = ({
     }
     setIsLoadingReader(true);
     try {
-      const signedUrl = await libraryService.getBookDigitalReadUrl(book.id, book.file_path);
-      setReadingUrl(signedUrl);
+      await libraryService.getBookDigitalReadUrl(book.id);
+      if (onOpenReader) {
+        onOpenReader(book.id);
+      } else if (typeof window !== 'undefined') {
+        window.history.pushState({}, '', `/read/${encodeURIComponent(book.id)}`);
+        window.dispatchEvent(new PopStateEvent('popstate'));
+      }
     } catch (err: any) {
-      setReaderError(err?.message || 'Gagal membuka dokumen digital buku.');
+      setReaderError(err?.message || 'Gagal membuka pembaca dokumen digital buku.');
     } finally {
       setIsLoadingReader(false);
     }
@@ -144,8 +154,19 @@ export const BookDetailModal: React.FC<BookDetailModalProps> = ({
                     <span>Peminjaman Aktif Disetujui</span>
                   </div>
                   <p className="text-[11px] text-emerald-700 mt-1">
-                    Anda dapat membaca koleksi ini dan mengembalikannya kapan saja setelah selesai.
+                    Anda dapat membaca koleksi ini hingga{' '}
+                    <strong>{formatDateIndo(userLoan?.due_at)}</strong> dan mengembalikannya kapan saja setelah selesai.
                   </p>
+                </div>
+              )}
+
+              {isApprovedStatus && !readAccess.allowed && (
+                <div className="mt-4 w-full p-3.5 rounded-2xl bg-rose-50 border border-rose-200 text-center">
+                  <div className="flex items-center justify-center gap-1.5 text-xs font-bold text-rose-800">
+                    <AlertCircle className="w-4 h-4 text-rose-600" />
+                    <span>Akses Baca Belum/Tidak Aktif</span>
+                  </div>
+                  <p className="text-[11px] text-rose-700 mt-1">{readAccess.message}</p>
                 </div>
               )}
 
@@ -206,7 +227,7 @@ export const BookDetailModal: React.FC<BookDetailModalProps> = ({
                     <div>
                       <p className="text-[11px] text-slate-500 font-medium">Format Dokumen</p>
                       <p className="text-xs font-semibold text-slate-800 uppercase">
-                        {book.file_type || (book.file_path ? 'PDF' : 'Fisik')}
+                        {resolvedFormat}
                       </p>
                     </div>
                   </div>
@@ -226,11 +247,13 @@ export const BookDetailModal: React.FC<BookDetailModalProps> = ({
               {/* Action Area */}
               <div className="mt-8 pt-6 border-t border-slate-200">
                 {isApprovedToRead ? (
-                  /* User has approved loan -> can read book */
+                  /* User has approved loan with valid unexpired due_at -> can read book internally */
                   <div className="space-y-3">
                     <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-200 space-y-3">
                       <p className="text-xs font-semibold text-emerald-900">
-                        Peminjaman Anda telah disetujui oleh admin. Anda dapat membuka berkas buku digital melalui tautan privat resmi:
+                        {book.file_path
+                          ? 'Peminjaman Anda telah disetujui oleh admin. Anda dapat membaca koleksi digital ini langsung di pembaca internal perpustakaan:'
+                          : 'Peminjaman Anda telah disetujui oleh admin. Koleksi ini merupakan buku fisik tanpa lampiran berkas digital.'}
                       </p>
                       {readerError && (
                         <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center gap-2">
@@ -238,18 +261,7 @@ export const BookDetailModal: React.FC<BookDetailModalProps> = ({
                           <span>{readerError}</span>
                         </div>
                       )}
-                      {readingUrl ? (
-                        <a
-                          href={readingUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="w-full py-3 px-4 rounded-xl font-bold text-sm bg-gradient-to-r from-emerald-600 to-teal-700 hover:from-emerald-500 hover:to-teal-600 text-white shadow-lg shadow-emerald-600/20 transition-all flex items-center justify-center gap-2"
-                        >
-                          <BookOpen className="w-4 h-4" />
-                          <span>Buka Tab Dokumen ({book.file_type?.toUpperCase() || 'PDF'})</span>
-                          <ExternalLink className="w-3.5 h-3.5 ml-1" />
-                        </a>
-                      ) : (
+                      {book.file_path && (
                         <button
                           type="button"
                           onClick={handleOpenReader}
@@ -261,12 +273,19 @@ export const BookDetailModal: React.FC<BookDetailModalProps> = ({
                           ) : (
                             <>
                               <BookOpen className="w-4 h-4" />
-                              <span>Siapkan Tautan Baca ({book.file_type?.toUpperCase() || 'PDF'})</span>
+                              <span>Baca Buku Sekarang ({resolvedFormat})</span>
                             </>
                           )}
                         </button>
                       )}
                     </div>
+                  </div>
+                ) : isApprovedStatus ? (
+                  <div className="p-4 rounded-2xl bg-rose-50 border border-rose-200 text-center space-y-1.5">
+                    <p className="text-sm font-bold text-rose-900">
+                      Akses Baca Dokumen Digital Ditolak
+                    </p>
+                    <p className="text-xs text-rose-700 leading-relaxed">{readAccess.message}</p>
                   </div>
                 ) : isPending ? (
                   <div className="p-4 rounded-2xl bg-amber-50 border border-amber-200 text-center">
