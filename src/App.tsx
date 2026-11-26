@@ -18,9 +18,20 @@ import { AdminCategoriesView } from './views/admin/AdminCategoriesView';
 import { AdminLoansView } from './views/admin/AdminLoansView';
 import { AdminUsersView } from './views/admin/AdminUsersView';
 import { AdminReportsView } from './views/admin/AdminReportsView';
+import { BookReaderView } from './views/BookReaderView';
 import { shouldRenderResetPasswordView } from './utils/authRecovery';
 import { BOOK_RETURN_NOTIFICATIONS, resolveBookReturnNotification } from './utils/libraryRules';
 import { supabase } from './services/supabaseClient';
+
+function parseReadBookRoute(pathname: string): string | null {
+  const match = pathname.match(/^\/read\/([^/]+)\/?$/);
+  if (!match) return null;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return match[1];
+  }
+}
 
 function LibraryApp() {
   const {
@@ -36,10 +47,15 @@ function LibraryApp() {
     if (typeof window === 'undefined') return false;
     return window.location.pathname === '/reset-password';
   });
+  const [activeReadBookId, setActiveReadBookId] = useState<string | null>(() => {
+    if (typeof window === 'undefined') return null;
+    return parseReadBookRoute(window.location.pathname);
+  });
 
   useEffect(() => {
     const handlePopState = () => {
       setIsResetPasswordRoute(window.location.pathname === '/reset-password');
+      setActiveReadBookId(parseReadBookRoute(window.location.pathname));
     };
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
@@ -72,6 +88,24 @@ function LibraryApp() {
     }
     setIsResetPasswordRoute(false);
   };
+
+  const openBookReader = useCallback((bookId: string) => {
+    const cleanId = String(bookId || '').trim();
+    if (!cleanId) return;
+    const targetPath = `/read/${encodeURIComponent(cleanId)}`;
+    if (typeof window !== 'undefined' && window.location.pathname !== targetPath) {
+      window.history.pushState({}, '', targetPath);
+    }
+    setSelectedBook(null);
+    setActiveReadBookId(cleanId);
+  }, []);
+
+  const closeBookReader = useCallback(() => {
+    if (typeof window !== 'undefined' && window.location.pathname.startsWith('/read/')) {
+      window.history.pushState({}, '', '/');
+    }
+    setActiveReadBookId(null);
+  }, []);
 
   // App Data State (Backed by Supabase)
   const [books, setBooks] = useState<Book[]>([]);
@@ -662,6 +696,25 @@ function LibraryApp() {
     );
   }
 
+  // INTERNAL READER ROUTE: /read/:bookId (hanya dapat diakses setelah login)
+  if (activeReadBookId) {
+    const matchedBook =
+      books.find((b) => b.id === activeReadBookId) ||
+      loans.find((l) => l.book_id === activeReadBookId)?.book ||
+      null;
+
+    return (
+      <>
+        <BookReaderView
+          bookId={activeReadBookId}
+          initialBook={matchedBook}
+          onBack={closeBookReader}
+        />
+        <ToastContainer />
+      </>
+    );
+  }
+
   const pendingLoansCount = loans.filter((l) => l.status === 'pending').length;
 
   // --- ADMIN ROLE ---
@@ -697,6 +750,7 @@ function LibraryApp() {
               onUpdateBook={handleUpdateBook}
               onDeleteBook={handleDeleteBook}
               onToggleArchive={handleToggleArchiveBook}
+              onInspectBook={openBookReader}
               isAddModalOpen={isAddBookModalOpen}
               setIsAddModalOpen={setIsAddBookModalOpen}
             />
@@ -819,6 +873,7 @@ function LibraryApp() {
             loans={loans}
             onReturnBook={handleReturnBook}
             onNavigateToCatalog={() => setVisitorTab('catalog')}
+            onOpenBookReader={openBookReader}
             isReturning={isReturningBook}
           />
         )}
@@ -843,6 +898,7 @@ function LibraryApp() {
         book={selectedBook}
         onClose={() => setSelectedBook(null)}
         onBorrow={handleBorrowBook}
+        onOpenReader={openBookReader}
         isBorrowing={isBorrowingBook}
         userLoan={currentBookUserLoan}
       />

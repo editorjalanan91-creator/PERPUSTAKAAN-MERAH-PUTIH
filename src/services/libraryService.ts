@@ -1,5 +1,6 @@
-import { supabase, recordActivityLog, getBookFileSignedUrl } from './supabaseClient';
+import { supabase, recordActivityLog } from './supabaseClient';
 import { Book, Category, Loan, Profile, ActivityLog } from '../types';
+import { resolveDocumentFileType, sanitizeDownloadFilename } from '../utils/epubUtils';
 
 async function getAccessToken(): Promise<string | null> {
   const {
@@ -578,11 +579,12 @@ export const libraryService = {
   },
 
   /**
-   * Mendapatkan tautan baca buku digital privat terverifikasi melalui backend (/api/books/:id/read-url)
+   * Memverifikasi hak akses baca buku digital via backend (/api/books/:id/read-url)
+   * dan mengembalikan rute pembaca internal (/read/:bookId) tanpa mengekspos URL Storage asli.
    */
   async getBookDigitalReadUrl(
     bookId: string,
-    fallbackFilePath?: string | null
+    _fallbackFilePath?: string | null
   ): Promise<string> {
     const cleanBookId = String(bookId || '').trim();
     if (!cleanBookId) {
@@ -596,6 +598,7 @@ export const libraryService = {
 
     const response = await fetch(`/api/books/${encodeURIComponent(cleanBookId)}/read-url`, {
       method: 'POST',
+      cache: 'no-store',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${token}`,
@@ -603,20 +606,146 @@ export const libraryService = {
     });
 
     const { payload } = await readJsonResponse(response);
-    if (response.ok && payload?.url) {
-      return payload.url as string;
-    }
-
-    if (!payload?.code && response.status === 404 && fallbackFilePath) {
-      const signed = await getBookFileSignedUrl(fallbackFilePath, 7200);
-      if (signed) return signed;
+    if (response.ok && (payload?.readerPath || payload?.url)) {
+      return (payload.readerPath || payload.url) as string;
     }
 
     throw buildApiError(
-      `Gagal menyiapkan tautan baca dokumen digital (HTTP ${response.status}).`,
+      `Gagal menyiapkan halaman baca dokumen digital (HTTP ${response.status}).`,
       payload,
       response.status
     );
+  },
+
+  /**
+   * Mengambil metadata & stream byte dokumen (EPUB/PDF) melalui backend terverifikasi
+   * (/api/books/:id/read-url -> /api/books/:id/content) agar URL asli Supabase Storage tetap privat.
+   */
+  async fetchBookDocumentContent(bookId: string): Promise<{
+    arrayBuffer: ArrayBuffer;
+    contentType: string;
+    fileType: 'epub' | 'pdf';
+    book?: Partial<Book>;
+  }> {
+    const cleanBookId = String(bookId || '').trim();
+    if (!cleanBookId) {
+      throw new Error('ID buku tidak valid.');
+    }
+
+    const token = await getAccessToken();
+    if (!token) {
+      throw new Error('Sesi login tidak ditemukan. Silakan masuk kembali untuk membaca dokumen.');
+    }
+
+    const metaRes = await fetch(`/api/books/${encodeURIComponent(cleanBookId)}/read-url`, {
+      method: 'POST',
+      cache: 'no-store',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+    });
+
+    const { payload: metaPayload } = await readJsonResponse(metaRes);
+    if (!metaRes.ok) {
+      throw buildApiError(
+        `Anda tidak memiliki izin atau gagal memverifikasi akses dokumen (HTTP ${metaRes.status}).`,
+        metaPayload,
+        metaRes.status
+      );
+    }
+
+    const streamPath = String(metaPayload?.streamUrl || `/api/books/${encodeURIComponent(cleanBookId)}/content`);
+    const contentRes = await fetch(streamPath, {
+      method: 'GET',
+      cache: 'no-store',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+
+    if (!contentRes.ok) {
+      const { payload: errPayload } = await readJsonResponse(contentRes);
+      throw buildApiError(
+        `Gagal memuat konten dokumen digital (HTTP ${contentRes.status}).`,
+        errPayload,
+        contentRes.status
+      );
+    }
+
+    const arrayBuffer = await contentRes.arrayBuffer();
+    const contentType = contentRes.headers.get('content-type') || '';
+    const headerFormat = contentRes.headers.get('x-document-format');
+    const fileType = resolveDocumentFileType(
+      headerFormat || metaPayload?.fileType || contentType,
+      null,
+      new Uint8Array(arrayBuffer)
+    );
+
+    return {
+      arrayBuffer,
+      contentType,
+      fileType,
+      book: metaPayload?.book as Partial<Book> | undefined,
+    };
+  },
+
+  /**
+   * Khusus Admin: mengunduh file EPUB/PDF asli melalui endpoint /api/admin/books/:id/download.
+   */
+  async downloadOriginalBookFileForAdmin(
+    bookId: string,
+    fallbackTitle?: string | null,
+    fallbackType?: string | null
+  ): Promise<void> {
+    const cleanBookId = String(bookId || '').trim();
+    if (!cleanBookId) {
+      throw new Error('ID buku tidak valid.');
+    }
+
+    const token = await getAccessToken();
+    if (!token) {
+      throw new Error('Sesi administrator tidak ditemukan. Silakan masuk kembali.');
+    }
+
+    const response = await fetch(`/api/admin/books/${encodeURIComponent(cleanBookId)}/download`, {
+      method: 'GET',
+      cache: 'no-store',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+
+    if (!response.ok) {
+      const { payload } = await readJsonResponse(response);
+      throw buildApiError(
+        `Gagal mengunduh dokumen asli buku (HTTP ${response.status}).`,
+        payload,
+        response.status
+      );
+    }
+
+    const blob = await response.blob();
+    const disposition = response.headers.get('content-disposition') || '';
+    const filenameMatch = disposition.match(/filename="?([^";]+)"?/i);
+    const detectedExt = resolveDocumentFileType(
+      fallbackType || response.headers.get('content-type'),
+      filenameMatch?.[1] || null
+    );
+    const filename = filenameMatch?.[1] || sanitizeDownloadFilename(fallbackTitle, detectedExt);
+
+    const blobUrl = URL.createObjectURL(blob);
+    try {
+      const anchor = document.createElement('a');
+      anchor.href = blobUrl;
+      anchor.download = filename;
+      anchor.rel = 'noopener noreferrer';
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+    } finally {
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 1500);
+    }
   },
 
   /**

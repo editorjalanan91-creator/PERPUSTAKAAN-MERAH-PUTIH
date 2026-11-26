@@ -22,6 +22,8 @@ import {
   formatCurrencyIdr,
   evaluateLoanOverdue,
   formatBookReturnErrorMessage,
+  evaluateDigitalBookReadAccess,
+  evaluateActiveLoansReadAccess,
 } from './libraryRules';
 import { Book, Loan } from '../types';
 
@@ -540,3 +542,68 @@ test('evaluateLoanStatus & evaluateLoanOverdue treat due_at=null loans as active
     daysRemaining: null,
   });
 });
+
+test('evaluateDigitalBookReadAccess & evaluateActiveLoansReadAccess enforce approved/borrowed status and valid unexpired due_at', () => {
+  const nowMs = Date.parse('2026-11-26T10:00:00.000Z');
+  const futureDue = '2026-12-03T10:00:00.000Z';
+  const pastDue = '2026-11-25T10:00:00.000Z';
+
+  // Approved / borrowed with valid future due_at -> allowed
+  assert.equal(
+    evaluateDigitalBookReadAccess({ status: 'approved', due_at: futureDue, returned_at: null }, nowMs).allowed,
+    true
+  );
+  assert.equal(
+    evaluateDigitalBookReadAccess({ status: 'borrowed', due_at: futureDue, returned_at: null }, nowMs).allowed,
+    true
+  );
+
+  // Empty / null / whitespace due_at -> rejected
+  for (const emptyDue of [null, undefined, '', '   ']) {
+    const res = evaluateDigitalBookReadAccess(
+      { status: 'approved', due_at: emptyDue, returned_at: null },
+      nowMs
+    );
+    assert.equal(res.allowed, false);
+    assert.equal(res.code, 'LOAN_DUE_DATE_REQUIRED');
+  }
+
+  // Invalid due_at -> rejected
+  for (const badDue of ['not-a-date', '2026-99-99', 'invalid']) {
+    const res = evaluateDigitalBookReadAccess(
+      { status: 'borrowed', due_at: badDue, returned_at: null },
+      nowMs
+    );
+    assert.equal(res.allowed, false);
+    assert.equal(res.code, 'LOAN_DUE_DATE_INVALID');
+  }
+
+  // Expired due_at -> rejected
+  const expiredRes = evaluateDigitalBookReadAccess(
+    { status: 'approved', due_at: pastDue, returned_at: null },
+    nowMs
+  );
+  assert.equal(expiredRes.allowed, false);
+  assert.equal(expiredRes.code, 'LOAN_EXPIRED');
+
+  // Pending / returned / rejected -> FORBIDDEN
+  for (const status of ['pending', 'returned', 'rejected', 'expired'] as const) {
+    const res = evaluateDigitalBookReadAccess(
+      { status, due_at: futureDue, returned_at: null },
+      nowMs
+    );
+    assert.equal(res.allowed, false);
+    assert.equal(res.code, 'FORBIDDEN');
+  }
+
+  // evaluateActiveLoansReadAccess picks the valid loan if user has an old invalid loan + a valid loan
+  const multiRes = evaluateActiveLoansReadAccess(
+    [
+      { status: 'approved', due_at: null, returned_at: null },
+      { status: 'borrowed', due_at: futureDue, returned_at: null },
+    ],
+    nowMs
+  );
+  assert.equal(multiRes.allowed, true);
+});
+

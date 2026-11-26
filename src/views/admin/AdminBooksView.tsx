@@ -1,12 +1,15 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { Book, Category } from '../../types';
 import { getBookCoverUrl, uploadBookCover, uploadBookFile } from '../../services/supabaseClient';
+import { libraryService } from '../../services/libraryService';
+import { useAuth } from '../../context/AuthContext';
 import {
   validateBookFormInput,
   validateCoverFile,
   validateBookDocumentFile,
   recalculateBookStockOnEdit,
 } from '../../utils/libraryRules';
+import { resolveDocumentFileType } from '../../utils/epubUtils';
 import {
   BookOpen,
   Plus,
@@ -20,6 +23,7 @@ import {
   X,
   AlertTriangle,
   FileUp,
+  Download,
 } from 'lucide-react';
 
 interface AdminBooksViewProps {
@@ -29,6 +33,7 @@ interface AdminBooksViewProps {
   onUpdateBook: (id: string, bookData: any) => Promise<void>;
   onDeleteBook: (id: string) => Promise<void>;
   onToggleArchive?: (id: string, isArchived: boolean) => Promise<void>;
+  onInspectBook?: (bookId: string) => void;
   isAddModalOpen?: boolean;
   setIsAddModalOpen?: (open: boolean) => void;
 }
@@ -40,9 +45,11 @@ export const AdminBooksView: React.FC<AdminBooksViewProps> = ({
   onUpdateBook,
   onDeleteBook,
   onToggleArchive,
+  onInspectBook,
   isAddModalOpen: controlledAddModalOpen,
   setIsAddModalOpen: setControlledAddModalOpen,
 }) => {
+  const { showToast } = useAuth();
   const [internalAddModalOpen, setInternalAddModalOpen] = useState(false);
   const isAddModalOpen = controlledAddModalOpen !== undefined ? controlledAddModalOpen : internalAddModalOpen;
   const setAddModalOpen = setControlledAddModalOpen || setInternalAddModalOpen;
@@ -73,6 +80,7 @@ export const AdminBooksView: React.FC<AdminBooksViewProps> = ({
   const [formData, setFormData] = useState(initialFormState);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [archivingBookId, setArchivingBookId] = useState<string | null>(null);
+  const [downloadingBookId, setDownloadingBookId] = useState<string | null>(null);
   const [uploadingCover, setUploadingCover] = useState(false);
   const [uploadingDoc, setUploadingDoc] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
@@ -281,6 +289,23 @@ export const AdminBooksView: React.FC<AdminBooksViewProps> = ({
     }
   };
 
+  const handleDownloadOriginalFile = async (book: Book) => {
+    if (!book.file_path || downloadingBookId === book.id) return;
+    setDownloadingBookId(book.id);
+    try {
+      await libraryService.downloadOriginalBookFileForAdmin(
+        book.id,
+        book.title,
+        book.file_type
+      );
+      showToast('Berkas dokumen asli berhasil diunduh.', 'success', 'Unduhan Selesai');
+    } catch (err: any) {
+      showToast(err?.message || 'Gagal mengunduh dokumen asli buku.', 'error');
+    } finally {
+      setDownloadingBookId(null);
+    }
+  };
+
   return (
     <div className="space-y-6">
       {/* Top Bar */}
@@ -419,10 +444,33 @@ export const AdminBooksView: React.FC<AdminBooksViewProps> = ({
                       </td>
                       <td className="py-3 px-4">
                         {book.file_path ? (
-                          <span className="inline-flex items-center gap-1 text-[10px] font-bold text-slate-700 px-2 py-0.5 rounded bg-slate-100 uppercase">
-                            <FileText className="w-3 h-3 text-blue-600" />
-                            {book.file_type || 'PDF'}
-                          </span>
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className="inline-flex items-center gap-1 text-[10px] font-bold text-slate-700 px-2 py-0.5 rounded bg-slate-100 uppercase">
+                              <FileText className="w-3 h-3 text-blue-600" />
+                              {resolveDocumentFileType(book.file_type, book.file_path).toUpperCase()}
+                            </span>
+                            {onInspectBook && (
+                              <button
+                                type="button"
+                                onClick={() => onInspectBook(book.id)}
+                                title="Periksa dokumen di pembaca"
+                                aria-label={`Periksa dokumen ${book.title}`}
+                                className="p-1 rounded-md text-blue-800 hover:bg-blue-50 transition-colors cursor-pointer"
+                              >
+                                <BookOpen className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              disabled={downloadingBookId === book.id}
+                              onClick={() => handleDownloadOriginalFile(book)}
+                              title="Unduh file asli (khusus Admin)"
+                              aria-label={`Unduh dokumen asli ${book.title}`}
+                              className="p-1 rounded-md text-emerald-700 hover:bg-emerald-50 transition-colors cursor-pointer disabled:opacity-50"
+                            >
+                              <Download className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
                         ) : (
                           <span className="text-[10px] text-slate-400 italic">Belum ada</span>
                         )}

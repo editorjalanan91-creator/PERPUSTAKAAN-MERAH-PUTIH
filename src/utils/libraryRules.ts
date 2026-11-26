@@ -455,11 +455,16 @@ export function validateBookDocumentFile(file: {
     };
   }
 
-  const mime = (file.type || '').toLowerCase();
+  const mime = (file.type || '').toLowerCase().split(';')[0].trim();
   if (mime) {
     const validPdfMime = ext === 'pdf' && (mime === 'application/pdf' || mime === 'application/x-pdf');
     const validEpubMime =
-      ext === 'epub' && (mime === 'application/epub+zip' || mime === 'application/octet-stream');
+      ext === 'epub' &&
+      (mime === 'application/epub+zip' ||
+        mime === 'application/x-epub+zip' ||
+        mime === 'application/octet-stream' ||
+        mime === 'application/zip' ||
+        mime === 'application/x-zip-compressed');
     if (!validPdfMime && !validEpubMime) {
       return {
         valid: false,
@@ -747,3 +752,92 @@ export function formatBookReturnErrorMessage(err: any): string {
 
   return rawMessage || BOOK_RETURN_NOTIFICATIONS.UNCONFIRMED.message;
 }
+
+export type DigitalReadAccessCode =
+  | 'OK'
+  | 'FORBIDDEN'
+  | 'LOAN_DUE_DATE_REQUIRED'
+  | 'LOAN_DUE_DATE_INVALID'
+  | 'LOAN_EXPIRED';
+
+export interface DigitalReadAccessResult {
+  allowed: boolean;
+  code: DigitalReadAccessCode;
+  message: string;
+}
+
+export function evaluateDigitalBookReadAccess(
+  loan: Pick<Loan, 'status' | 'due_at' | 'returned_at'> | null | undefined,
+  nowMs: number = Date.now()
+): DigitalReadAccessResult {
+  if (!loan || loan.returned_at || (loan.status !== 'approved' && loan.status !== 'borrowed')) {
+    return {
+      allowed: false,
+      code: 'FORBIDDEN',
+      message:
+        'Anda belum memiliki peminjaman aktif yang disetujui untuk membaca dokumen digital buku ini.',
+    };
+  }
+
+  const rawDueAt = typeof loan.due_at === 'string' ? loan.due_at.trim() : '';
+  if (!rawDueAt) {
+    return {
+      allowed: false,
+      code: 'LOAN_DUE_DATE_REQUIRED',
+      message:
+        'Akses baca dokumen digital ditolak karena tanggal jatuh tempo peminjaman belum tersedia.',
+    };
+  }
+
+  const dueMs = new Date(rawDueAt).getTime();
+  if (!Number.isFinite(dueMs)) {
+    return {
+      allowed: false,
+      code: 'LOAN_DUE_DATE_INVALID',
+      message:
+        'Akses baca dokumen digital ditolak karena tanggal jatuh tempo peminjaman tidak valid.',
+    };
+  }
+
+  if (dueMs < nowMs) {
+    return {
+      allowed: false,
+      code: 'LOAN_EXPIRED',
+      message:
+        'Masa peminjaman untuk membaca dokumen digital ini telah berakhir. Silakan kembalikan buku atau ajukan peminjaman ulang.',
+    };
+  }
+
+  return {
+    allowed: true,
+    code: 'OK',
+    message: 'Akses baca dokumen digital diizinkan.',
+  };
+}
+
+export function evaluateActiveLoansReadAccess(
+  loans: Array<Pick<Loan, 'status' | 'due_at' | 'returned_at'>> | null | undefined,
+  nowMs: number = Date.now()
+): DigitalReadAccessResult {
+  if (!Array.isArray(loans) || loans.length === 0) {
+    return evaluateDigitalBookReadAccess(null, nowMs);
+  }
+
+  let firstFailure: DigitalReadAccessResult | null = null;
+  for (const loan of loans) {
+    const check = evaluateDigitalBookReadAccess(loan, nowMs);
+    if (check.allowed) {
+      return check;
+    }
+    if (
+      !firstFailure ||
+      (firstFailure.code === 'FORBIDDEN' && check.code !== 'FORBIDDEN') ||
+      (firstFailure.code !== 'LOAN_EXPIRED' && check.code === 'LOAN_EXPIRED')
+    ) {
+      firstFailure = check;
+    }
+  }
+
+  return firstFailure || evaluateDigitalBookReadAccess(null, nowMs);
+}
+

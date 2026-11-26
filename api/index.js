@@ -312,6 +312,111 @@ function formatBookReturnErrorMessage(err) {
   }
   return rawMessage || BOOK_RETURN_NOTIFICATIONS.UNCONFIRMED.message;
 }
+function evaluateDigitalBookReadAccess(loan, nowMs = Date.now()) {
+  if (!loan || loan.returned_at || loan.status !== "approved" && loan.status !== "borrowed") {
+    return {
+      allowed: false,
+      code: "FORBIDDEN",
+      message: "Anda belum memiliki peminjaman aktif yang disetujui untuk membaca dokumen digital buku ini."
+    };
+  }
+  const rawDueAt = typeof loan.due_at === "string" ? loan.due_at.trim() : "";
+  if (!rawDueAt) {
+    return {
+      allowed: false,
+      code: "LOAN_DUE_DATE_REQUIRED",
+      message: "Akses baca dokumen digital ditolak karena tanggal jatuh tempo peminjaman belum tersedia."
+    };
+  }
+  const dueMs = new Date(rawDueAt).getTime();
+  if (!Number.isFinite(dueMs)) {
+    return {
+      allowed: false,
+      code: "LOAN_DUE_DATE_INVALID",
+      message: "Akses baca dokumen digital ditolak karena tanggal jatuh tempo peminjaman tidak valid."
+    };
+  }
+  if (dueMs < nowMs) {
+    return {
+      allowed: false,
+      code: "LOAN_EXPIRED",
+      message: "Masa peminjaman untuk membaca dokumen digital ini telah berakhir. Silakan kembalikan buku atau ajukan peminjaman ulang."
+    };
+  }
+  return {
+    allowed: true,
+    code: "OK",
+    message: "Akses baca dokumen digital diizinkan."
+  };
+}
+function evaluateActiveLoansReadAccess(loans, nowMs = Date.now()) {
+  if (!Array.isArray(loans) || loans.length === 0) {
+    return evaluateDigitalBookReadAccess(null, nowMs);
+  }
+  let firstFailure = null;
+  for (const loan of loans) {
+    const check = evaluateDigitalBookReadAccess(loan, nowMs);
+    if (check.allowed) {
+      return check;
+    }
+    if (!firstFailure || firstFailure.code === "FORBIDDEN" && check.code !== "FORBIDDEN" || firstFailure.code !== "LOAN_EXPIRED" && check.code === "LOAN_EXPIRED") {
+      firstFailure = check;
+    }
+  }
+  return firstFailure || evaluateDigitalBookReadAccess(null, nowMs);
+}
+
+// src/utils/epubUtils.ts
+import JSZip from "jszip";
+function toUint8Array(input) {
+  if (input instanceof Uint8Array) return input;
+  return new Uint8Array(input);
+}
+function hasZipMagicBytes(input) {
+  const bytes = toUint8Array(input);
+  if (bytes.length < 4) return false;
+  return bytes[0] === 80 && bytes[1] === 75 && (bytes[2] === 3 && bytes[3] === 4 || bytes[2] === 5 && bytes[3] === 6);
+}
+function hasPdfMagicBytes(input) {
+  const bytes = toUint8Array(input);
+  if (bytes.length < 5) return false;
+  const searchLimit = Math.min(bytes.length - 5, 1024);
+  for (let i = 0; i <= searchLimit; i++) {
+    if (bytes[i] === 37 && // %
+    bytes[i + 1] === 80 && // P
+    bytes[i + 2] === 68 && // D
+    bytes[i + 3] === 70 && // F
+    bytes[i + 4] === 45) {
+      return true;
+    }
+  }
+  return false;
+}
+function resolveDocumentFileType(fileType, filePath, bytes) {
+  const normalizedType = String(fileType || "").trim().toLowerCase();
+  if (normalizedType === "epub" || normalizedType === "application/epub+zip") {
+    return "epub";
+  }
+  if (normalizedType === "pdf" || normalizedType === "application/pdf") {
+    if (bytes && hasZipMagicBytes(bytes) && !hasPdfMagicBytes(bytes)) {
+      return "epub";
+    }
+    return "pdf";
+  }
+  const cleanPath = String(filePath || "").split("?")[0].trim().toLowerCase();
+  if (cleanPath.endsWith(".epub")) return "epub";
+  if (cleanPath.endsWith(".pdf")) return "pdf";
+  if (bytes) {
+    if (hasZipMagicBytes(bytes) && !hasPdfMagicBytes(bytes)) return "epub";
+    if (hasPdfMagicBytes(bytes)) return "pdf";
+  }
+  return "pdf";
+}
+function sanitizeDownloadFilename(title, ext) {
+  const ascii = String(title || "").normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-+|-+$/g, "").toLowerCase();
+  const stem = ascii.slice(0, 80) || "dokumen-perpustakaan";
+  return `${stem}.${ext}`;
+}
 
 // src/server/app.ts
 function sanitizeEnv(value) {
@@ -4085,15 +4190,144 @@ function createApp(options = {}) {
       });
     }
   });
+  const verifyBookDocumentReadAccess = async (req, bookId, supabaseAuth, supabaseAdmin) => {
+    if (!isValidUuid(bookId)) {
+      return { ok: false, status: 400, error: "ID buku tidak valid.", code: "INVALID_BOOK_ID" };
+    }
+    const authCheck = await verifyAuthenticatedUser(
+      req,
+      supabaseAuth,
+      supabaseAdmin,
+      "mengakses dokumen digital buku"
+    );
+    if (!authCheck.ok) {
+      return {
+        ok: false,
+        status: authCheck.status,
+        error: authCheck.error,
+        code: authCheck.status === 401 ? "UNAUTHORIZED" : "FORBIDDEN"
+      };
+    }
+    const actor = authCheck.userProfile;
+    const isActorAdmin = isAdminOrSuperAdminRole(actor.role) || actor.is_super_admin === true;
+    const { data: bookRows, error: bookErr } = await supabaseAdmin.from("books").select("id, title, author, publisher, publication_year, cover_path, file_path, file_type, is_archived").eq("id", bookId).limit(2);
+    if (bookErr) {
+      const permDenied = isDbPermissionDeniedError(bookErr);
+      return {
+        ok: false,
+        status: 500,
+        error: `Gagal memeriksa dokumen buku: ${bookErr.message}`,
+        code: permDenied ? "DB_PERMISSION_DENIED" : bookErr.code || "BOOK_FETCH_FAILED"
+      };
+    }
+    if (!bookRows || bookRows.length === 0) {
+      return {
+        ok: false,
+        status: 404,
+        error: "Data buku tidak ditemukan.",
+        code: "BOOK_NOT_FOUND"
+      };
+    }
+    const book = bookRows[0];
+    if (!book.file_path) {
+      return {
+        ok: false,
+        status: 404,
+        error: "Buku ini tidak memiliki lampiran dokumen digital (koleksi fisik).",
+        code: "NO_DIGITAL_FILE"
+      };
+    }
+    if (!isActorAdmin) {
+      const { data: activeLoanRows, error: loanErr } = await supabaseAdmin.from("loans").select("id, status, due_at, returned_at").eq("user_id", actor.id).eq("book_id", bookId).in("status", ["approved", "borrowed"]).limit(10);
+      if (loanErr) {
+        const permDenied = isDbPermissionDeniedError(loanErr);
+        return {
+          ok: false,
+          status: 500,
+          error: `Gagal memverifikasi hak akses peminjaman: ${loanErr.message}`,
+          code: permDenied ? "DB_PERMISSION_DENIED" : loanErr.code || "LOAN_CHECK_FAILED"
+        };
+      }
+      const accessCheck = evaluateActiveLoansReadAccess(activeLoanRows, Date.now());
+      if (!accessCheck.allowed) {
+        return {
+          ok: false,
+          status: 403,
+          error: accessCheck.message,
+          code: accessCheck.code
+        };
+      }
+    }
+    const fileType = resolveDocumentFileType(book.file_type, book.file_path);
+    return {
+      ok: true,
+      actor,
+      isActorAdmin,
+      book,
+      fileType
+    };
+  };
+  const downloadPrivateBookStorageBuffer = async (supabaseAdmin, filePath) => {
+    const cleanPath = String(filePath || "").trim().replace(/^\/+/, "");
+    if (!cleanPath || cleanPath.includes("..")) {
+      return {
+        ok: false,
+        status: 400,
+        error: "Path berkas dokumen di penyimpanan tidak valid.",
+        code: "INVALID_FILE_PATH"
+      };
+    }
+    const storageBucket = supabaseAdmin?.storage?.from?.("book-files");
+    if (storageBucket && typeof storageBucket.download === "function") {
+      const { data: fileData, error: downloadErr } = await storageBucket.download(cleanPath);
+      if (downloadErr || !fileData) {
+        const msg = downloadErr?.message || "Berkas dokumen digital tidak ditemukan di penyimpanan privat.";
+        const isNotFound = /not found|404|object not found/i.test(msg);
+        return {
+          ok: false,
+          status: isNotFound ? 404 : 502,
+          error: isNotFound ? "Berkas dokumen digital buku ini tidak ditemukan di Supabase Storage (book-files)." : `Gagal mengambil berkas dokumen dari penyimpanan privat: ${msg}`,
+          code: isNotFound ? "STORAGE_FILE_NOT_FOUND" : "STORAGE_DOWNLOAD_FAILED"
+        };
+      }
+      let buffer;
+      if (Buffer.isBuffer(fileData)) {
+        buffer = fileData;
+      } else if (fileData instanceof Uint8Array) {
+        buffer = Buffer.from(fileData);
+      } else if (fileData instanceof ArrayBuffer) {
+        buffer = Buffer.from(fileData);
+      } else if (typeof fileData.arrayBuffer === "function") {
+        const ab = await fileData.arrayBuffer();
+        buffer = Buffer.from(ab);
+      } else {
+        return {
+          ok: false,
+          status: 500,
+          error: "Format respons berkas dari Supabase Storage tidak dikenali.",
+          code: "INVALID_STORAGE_PAYLOAD"
+        };
+      }
+      if (buffer.length === 0) {
+        return {
+          ok: false,
+          status: 422,
+          error: "Berkas dokumen digital kosong (0 byte) atau rusak.",
+          code: "EMPTY_DOCUMENT_FILE"
+        };
+      }
+      return { ok: true, buffer };
+    }
+    return {
+      ok: false,
+      status: 500,
+      error: "Klien penyimpanan privat server belum siap mengunduh dokumen.",
+      code: "STORAGE_CLIENT_UNAVAILABLE"
+    };
+  };
   app2.post("/api/books/:id/read-url", async (req, res) => {
     try {
       const bookId = String(req.params.id || "").trim();
-      if (!isValidUuid(bookId)) {
-        return res.status(400).json({
-          error: "ID buku tidak valid.",
-          code: "INVALID_BOOK_ID"
-        });
-      }
       const { client: supabaseAuth, error: authClientError } = getAuthClient();
       if (!supabaseAuth) {
         return res.status(500).json({
@@ -4106,23 +4340,120 @@ function createApp(options = {}) {
           error: adminClientError || "Konfigurasi admin server belum lengkap."
         });
       }
-      const authCheck = await verifyAuthenticatedUser(
-        req,
-        supabaseAuth,
-        supabaseAdmin,
-        "mengakses dokumen digital buku"
-      );
-      if (!authCheck.ok) {
-        return res.status(authCheck.status).json({ error: authCheck.error });
+      const access = await verifyBookDocumentReadAccess(req, bookId, supabaseAuth, supabaseAdmin);
+      if (!access.ok) {
+        return res.status(access.status).json({ error: access.error, code: access.code });
       }
-      const actor = authCheck.userProfile;
-      const isActorAdmin = isAdminOrSuperAdminRole(actor.role) || actor.is_super_admin === true;
-      const { data: bookRows, error: bookErr } = await supabaseAdmin.from("books").select("id, title, file_path, file_type, is_archived").eq("id", bookId).limit(2);
+      const readerPath = `/read/${access.book.id}`;
+      const streamUrl = `/api/books/${access.book.id}/content`;
+      return res.json({
+        success: true,
+        url: readerPath,
+        readerPath,
+        streamUrl,
+        fileType: access.fileType,
+        book: {
+          id: access.book.id,
+          title: access.book.title,
+          author: access.book.author,
+          publisher: access.book.publisher,
+          publication_year: access.book.publication_year,
+          cover_path: access.book.cover_path,
+          file_type: access.fileType
+        }
+      });
+    } catch (err) {
+      return res.status(500).json({
+        error: err?.message || "Terjadi kesalahan saat menyiapkan dokumen digital.",
+        code: "INTERNAL_READ_URL_ERROR"
+      });
+    }
+  });
+  app2.get("/api/books/:id/content", async (req, res) => {
+    try {
+      const bookId = String(req.params.id || "").trim();
+      const { client: supabaseAuth, error: authClientError } = getAuthClient();
+      if (!supabaseAuth) {
+        return res.status(500).json({
+          error: authClientError || "Konfigurasi autentikasi server belum lengkap."
+        });
+      }
+      const { client: supabaseAdmin, error: adminClientError } = getAdminClient();
+      if (!supabaseAdmin) {
+        return res.status(500).json({
+          error: adminClientError || "Konfigurasi admin server belum lengkap."
+        });
+      }
+      const access = await verifyBookDocumentReadAccess(req, bookId, supabaseAuth, supabaseAdmin);
+      if (!access.ok) {
+        return res.status(access.status).json({ error: access.error, code: access.code });
+      }
+      const downloadRes = await downloadPrivateBookStorageBuffer(supabaseAdmin, access.book.file_path);
+      if (!downloadRes.ok) {
+        return res.status(downloadRes.status).json({
+          error: downloadRes.error,
+          code: downloadRes.code
+        });
+      }
+      const buffer = downloadRes.buffer;
+      const detectedType = resolveDocumentFileType(access.fileType, access.book.file_path, buffer);
+      if (detectedType === "epub" && !hasZipMagicBytes(buffer)) {
+        return res.status(422).json({
+          error: "Berkas EPUB di penyimpanan rusak atau bukan arsip EPUB yang valid.",
+          code: "INVALID_EPUB_FILE"
+        });
+      }
+      if (detectedType === "pdf" && !hasPdfMagicBytes(buffer)) {
+        return res.status(422).json({
+          error: "Berkas PDF di penyimpanan rusak atau tidak valid.",
+          code: "INVALID_PDF_FILE"
+        });
+      }
+      const contentType = detectedType === "epub" ? "application/epub+zip" : "application/pdf";
+      res.setHeader("Content-Type", contentType);
+      res.setHeader("Content-Disposition", "inline");
+      res.setHeader("Cache-Control", "private, no-store, no-cache, must-revalidate");
+      res.setHeader("Pragma", "no-cache");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader("X-Frame-Options", "SAMEORIGIN");
+      res.setHeader("X-Document-Format", detectedType);
+      res.setHeader("Content-Length", String(buffer.length));
+      return res.status(200).send(buffer);
+    } catch (err) {
+      return res.status(500).json({
+        error: err?.message || "Terjadi kesalahan saat mengalirkan konten dokumen digital.",
+        code: "INTERNAL_CONTENT_STREAM_ERROR"
+      });
+    }
+  });
+  app2.get("/api/admin/books/:id/download", async (req, res) => {
+    try {
+      const bookId = String(req.params.id || "").trim();
+      if (!isValidUuid(bookId)) {
+        return res.status(400).json({
+          error: "ID buku tidak valid.",
+          code: "INVALID_BOOK_ID"
+        });
+      }
+      const { client: supabaseAuth, error: authClientError } = getAuthClient();
+      const { client: supabaseAdmin, error: adminClientError } = getAdminClient();
+      if (!supabaseAuth || !supabaseAdmin) {
+        return res.status(500).json({
+          error: adminClientError || authClientError || "Konfigurasi server belum lengkap."
+        });
+      }
+      const adminCheck = await verifyAdminRequest(req, supabaseAuth, supabaseAdmin);
+      if (!adminCheck.ok) {
+        return res.status(adminCheck.status).json({
+          error: adminCheck.error,
+          code: adminCheck.status === 401 ? "UNAUTHORIZED" : "FORBIDDEN"
+        });
+      }
+      const { data: bookRows, error: bookErr } = await supabaseAdmin.from("books").select("id, title, file_path, file_type").eq("id", bookId).limit(2);
       if (bookErr) {
-        const permDenied = isDbPermissionDeniedError(bookErr);
         return res.status(500).json({
           error: `Gagal memeriksa dokumen buku: ${bookErr.message}`,
-          code: permDenied ? "DB_PERMISSION_DENIED" : bookErr.code || "BOOK_FETCH_FAILED"
+          code: bookErr.code || "BOOK_FETCH_FAILED"
         });
       }
       if (!bookRows || bookRows.length === 0) {
@@ -4134,54 +4465,46 @@ function createApp(options = {}) {
       const book = bookRows[0];
       if (!book.file_path) {
         return res.status(404).json({
-          error: "Buku ini tidak memiliki lampiran dokumen digital (koleksi fisik).",
+          error: "Buku ini belum memiliki file dokumen digital (PDF/EPUB).",
           code: "NO_DIGITAL_FILE"
         });
       }
-      if (!isActorAdmin) {
-        const { data: activeLoanRows, error: loanErr } = await supabaseAdmin.from("loans").select("id, status, due_at").eq("user_id", actor.id).eq("book_id", bookId).in("status", ["approved", "borrowed"]).limit(10);
-        if (loanErr) {
-          const permDenied = isDbPermissionDeniedError(loanErr);
-          return res.status(500).json({
-            error: `Gagal memverifikasi hak akses peminjaman: ${loanErr.message}`,
-            code: permDenied ? "DB_PERMISSION_DENIED" : loanErr.code || "LOAN_CHECK_FAILED"
-          });
-        }
-        if (!activeLoanRows || activeLoanRows.length === 0) {
-          return res.status(403).json({
-            error: "Anda belum memiliki peminjaman aktif yang disetujui untuk membaca dokumen digital buku ini.",
-            code: "FORBIDDEN"
-          });
-        }
-        const nowMs = Date.now();
-        const hasValidUnexpiredLoan = activeLoanRows.some((loan) => {
-          if (!loan.due_at) return true;
-          const dueMs = new Date(loan.due_at).getTime();
-          return Number.isNaN(dueMs) || dueMs >= nowMs;
-        });
-        if (!hasValidUnexpiredLoan) {
-          return res.status(403).json({
-            error: "Masa peminjaman untuk membaca dokumen digital ini telah berakhir. Silakan kembalikan buku atau ajukan peminjaman ulang.",
-            code: "LOAN_EXPIRED"
-          });
-        }
-      }
-      const { data: signedData, error: signedErr } = await supabaseAdmin.storage.from("book-files").createSignedUrl(book.file_path, 7200);
-      if (signedErr || !signedData?.signedUrl) {
-        return res.status(500).json({
-          error: signedErr?.message || "Gagal membuat tautan baca dokumen digital.",
-          code: "SIGNED_URL_FAILED"
+      const downloadRes = await downloadPrivateBookStorageBuffer(supabaseAdmin, book.file_path);
+      if (!downloadRes.ok) {
+        return res.status(downloadRes.status).json({
+          error: downloadRes.error,
+          code: downloadRes.code
         });
       }
-      return res.json({
-        success: true,
-        url: signedData.signedUrl,
-        fileType: book.file_type || "pdf"
-      });
+      const buffer = downloadRes.buffer;
+      const detectedType = resolveDocumentFileType(book.file_type, book.file_path, buffer);
+      const filename = sanitizeDownloadFilename(book.title, detectedType);
+      const contentType = detectedType === "epub" ? "application/epub+zip" : "application/pdf";
+      try {
+        await supabaseAdmin.from("activity_logs").insert({
+          actor_id: adminCheck.adminProfile.id,
+          action: "download_book_file",
+          entity_type: "books",
+          entity_id: book.id,
+          details: JSON.stringify({
+            title: book.title,
+            file_type: detectedType,
+            filename
+          }),
+          created_at: (/* @__PURE__ */ new Date()).toISOString()
+        });
+      } catch {
+      }
+      res.setHeader("Content-Type", contentType);
+      res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+      res.setHeader("Cache-Control", "private, no-store");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader("Content-Length", String(buffer.length));
+      return res.status(200).send(buffer);
     } catch (err) {
       return res.status(500).json({
-        error: err?.message || "Terjadi kesalahan saat menyiapkan dokumen digital.",
-        code: "INTERNAL_READ_URL_ERROR"
+        error: err?.message || "Terjadi kesalahan saat mengunduh dokumen asli.",
+        code: "INTERNAL_ADMIN_DOWNLOAD_ERROR"
       });
     }
   });

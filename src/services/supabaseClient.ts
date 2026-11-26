@@ -323,26 +323,6 @@ export function getBookCoverUrl(coverPath: string | null | undefined): string {
 }
 
 /**
- * Mendapatkan Signed URL untuk file buku privat dari bucket book-files
- * Hanya dapat diakses dengan masa berlaku tertentu (misal: 60 menit)
- */
-export async function getBookFileSignedUrl(
-  filePath: string | null | undefined,
-  expiresInSeconds = 3600
-): Promise<string | null> {
-  if (!filePath) return null;
-  const { data, error } = await supabase.storage
-    .from(BUCKET_FILES)
-    .createSignedUrl(filePath, expiresInSeconds);
-
-  if (error || !data?.signedUrl) {
-    console.error('Gagal membuat signed URL untuk file buku:', error);
-    return null;
-  }
-  return data.signedUrl;
-}
-
-/**
  * Unggah foto sampul buku ke bucket public 'book-covers'
  */
 export async function uploadBookCover(file: File): Promise<string> {

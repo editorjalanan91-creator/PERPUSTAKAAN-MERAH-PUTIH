@@ -55,6 +55,12 @@ function createMockSupabaseAuthClient() {
             error: null,
           };
         }
+        if (token === 'other-visitor-token') {
+          return {
+            data: { user: { id: VISITOR_WITH_LOANS_ID, email: 'siti@example.com' } },
+            error: null,
+          };
+        }
         return { data: { user: null }, error: { message: 'Invalid token' } };
       },
     },
@@ -114,10 +120,15 @@ function createMockSupabaseAdmin(options?: {
   const createdAuthUsers: Array<{ id: string; email: string; user_metadata: any }> = [];
   const activityLogs: any[] = [];
   const categoriesTouches: string[] = [];
+  const storageFiles: Record<string, Buffer> = {
+    'documents/arsitektur.pdf': Buffer.from('%PDF-1.4 mock content'),
+  };
   const books: Array<{
     id: string;
     title: string;
     author: string;
+    publisher?: string | null;
+    publication_year?: number | null;
     cover_path: string | null;
     file_path?: string | null;
     file_type?: string | null;
@@ -974,6 +985,19 @@ function createMockSupabaseAdmin(options?: {
               error: null,
             };
           },
+          async download(path: string) {
+            if (bucket !== 'book-files') {
+              return { data: null, error: { message: 'Bucket not found' } };
+            }
+            const buf = storageFiles[path];
+            if (!buf) {
+              return { data: null, error: { message: 'Object not found' } };
+            }
+            return {
+              data: new Blob([new Uint8Array(buf)]),
+              error: null,
+            };
+          },
         };
       },
     },
@@ -994,6 +1018,7 @@ function createMockSupabaseAdmin(options?: {
     loansMutations,
     profiles,
     authUsersState,
+    storageFiles,
   };
 }
 
@@ -2275,7 +2300,7 @@ test('POST /api/loans/:id/approve decrements available_copies once without doubl
   assert.equal(triggerMock.books.find((b) => b.id === BOOK_MAIN_ID)?.available_copies, 1);
 });
 
-test('POST /api/books/:id/read-url enforces active approved loan or admin role before issuing signed URL', async () => {
+test('POST /api/books/:id/read-url enforces active approved loan or admin role and never leaks raw Storage signed URLs', async () => {
   const mock = createMockSupabaseAdmin();
   // Set active loan due_at strictly in the future so it is valid
   const futureDue = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
@@ -2283,7 +2308,7 @@ test('POST /api/books/:id/read-url enforces active approved loan or admin role b
   mock.loans[1].due_at = futureDue;
 
   await withServer(mock, async (baseUrl) => {
-    // 1. Visitor with active unexpired loan gets signed URL
+    // 1. Visitor with active unexpired loan gets internal readerPath & streamUrl (NOT Supabase Storage URL)
     const okRes = await fetch(`${baseUrl}/api/books/${BOOK_MAIN_ID}/read-url`, {
       method: 'POST',
       headers: { Authorization: 'Bearer visitor-token' },
@@ -2291,7 +2316,10 @@ test('POST /api/books/:id/read-url enforces active approved loan or admin role b
     assert.equal(okRes.status, 200);
     const okBody = await okRes.json();
     assert.equal(okBody.success, true);
-    assert.match(okBody.url, /book-files\/documents\/arsitektur\.pdf/);
+    assert.equal(okBody.url, `/read/${BOOK_MAIN_ID}`);
+    assert.equal(okBody.readerPath, `/read/${BOOK_MAIN_ID}`);
+    assert.equal(okBody.streamUrl, `/api/books/${BOOK_MAIN_ID}/content`);
+    assert.equal(/supabase\.co\/storage|createSignedUrl|token=/i.test(JSON.stringify(okBody)), false);
 
     // 2. Admin can always read digital books with file_path
     const adminRes = await fetch(`${baseUrl}/api/books/${BOOK_MAIN_ID}/read-url`, {
@@ -3599,8 +3627,292 @@ test('Book collection management: free delete, active/historical loan rejection 
   });
 });
 
-test('libraryService never falls back to direct browser supabase.from("books") insert/update/delete', async () => {
+test('libraryService, supabaseClient, and reader views never use browser supabase.from("books") mutations, client signed Storage URLs for book-files, or SUPABASE_SERVICE_ROLE_KEY', async () => {
   const fs = await import('node:fs');
-  const src = fs.readFileSync('src/services/libraryService.ts', 'utf8');
-  assert.equal(/supabase\.from\(['"]books['"]\)\.(insert|update|delete)/.test(src), false);
+  const serviceSrc = fs.readFileSync('src/services/libraryService.ts', 'utf8');
+  assert.equal(/supabase\.from\(['"]books['"]\)\.(insert|update|delete)/.test(serviceSrc), false);
+  assert.equal(/getBookFileSignedUrl/.test(serviceSrc), false);
+
+  const clientSrc = fs.readFileSync('src/services/supabaseClient.ts', 'utf8');
+  assert.equal(/getBookFileSignedUrl/.test(clientSrc), false);
+  assert.equal(/createSignedUrl/.test(clientSrc), false);
+  assert.equal(/import\.meta\.env\.SUPABASE_SERVICE_ROLE_KEY/.test(clientSrc), false);
+
+  const readerSrc = fs.readFileSync('src/views/BookReaderView.tsx', 'utf8');
+  assert.equal(/window\.print\s*\(/.test(readerSrc), false);
+  assert.equal(/\bdownload\s*=/.test(readerSrc), false);
+  assert.equal(/<iframe\b/i.test(readerSrc), false);
+  assert.equal(/URL\.createObjectURL/.test(readerSrc), false);
+  assert.match(readerSrc, /pdfjs-dist/);
+  assert.match(readerSrc, /epubjs/);
+
+  const detailSrc = fs.readFileSync('src/components/BookDetailModal.tsx', 'utf8');
+  const loansSrc = fs.readFileSync('src/views/UserLoansView.tsx', 'utf8');
+  assert.equal(/createSignedUrl|getBookFileSignedUrl/.test(detailSrc), false);
+  assert.equal(/createSignedUrl|getBookFileSignedUrl/.test(loansSrc), false);
+
+  // Migration 20261125 & full migration chain audit:
+  // - Never use COALESCE(qual, '') NOT ILIKE '%bucket_id%' (or generic files_select% wildcard) to drop policies
+  // - Inspect full qual/with_check/cmd/roles/permissive expressions
+  // - Replace multi-bucket policies preserving other buckets while guarding (bucket_id <> 'book-files')
+  // - Drop files_select_authorized only when proven exclusive to book-files
+  // - Abort reporting any unexpected single-bucket policy opening book-files
+  // - Keep Admin-only select on book-files, RLS enabled, private bucket, and zero destructive Production ops across all 4 migrations
+  const migrationFiles = [
+    'supabase/migrations/20261116_visitor_archive_and_super_admin.sql',
+    'supabase/migrations/20261118_loans_books_return_grants_and_rls.sql',
+    'supabase/migrations/20261121_books_management_integrity_and_rls.sql',
+    'supabase/migrations/20261125_book_files_private_stream_security.sql',
+  ];
+  for (const migPath of migrationFiles) {
+    const rawSql = fs.readFileSync(migPath, 'utf8');
+    const sqlNoComments = rawSql.replace(/--.*$/gm, '');
+    assert.equal(/\bDROP\s+TABLE\b/i.test(sqlNoComments), false, `${migPath} must not DROP TABLE`);
+    assert.equal(/\bTRUNCATE\s+(?:TABLE\s+)?(?:public|auth|storage)\./i.test(sqlNoComments), false, `${migPath} must not TRUNCATE`);
+    assert.equal(/DISABLE\s+ROW\s+LEVEL\s+SECURITY/i.test(sqlNoComments), false, `${migPath} must not disable RLS`);
+  }
+
+  const storageMig = fs.readFileSync(
+    'supabase/migrations/20261125_book_files_private_stream_security.sql',
+    'utf8'
+  );
+  const storageMigNoComments = storageMig.replace(/--.*$/gm, '');
+  assert.equal(/policyname\s+ILIKE\s+'files_select%'/i.test(storageMig), false);
+  assert.equal(/policyname\s+ILIKE\s+'%book-files%'/i.test(storageMig), false);
+  assert.equal(/policyname\s+ILIKE\s+'%book_files%'/i.test(storageMig), false);
+  assert.equal(/COALESCE\(qual,\s*''\)\s+NOT\s+ILIKE\s+'%bucket_id%'/i.test(storageMig), false);
+  assert.equal(/\bGRANT\b|\bREVOKE\b|public\.books/i.test(storageMigNoComments), false);
+  assert.match(storageMig, /p\.permissive\s*=\s*'PERMISSIVE'/);
+  assert.match(storageMig, /v_already_guarded/);
+  assert.match(storageMig, /v_serves_other_buckets/);
+  assert.match(storageMig, /'\(bucket_id <> %L\) AND \(%s\)'/);
+  assert.match(storageMig, /ELSIF v_pol\.policyname = 'files_select_authorized' THEN/);
+  assert.match(storageMig, /MIGRATION DIBATALKAN: Ditemukan policy tambahan/);
+  assert.match(storageMig, /pmp_storage_book_files_select/);
+  assert.match(storageMig, /public\.is_admin\(\)/);
+  assert.match(storageMig, /v_exposed_policies IS NOT NULL/);
+  assert.match(storageMig, /v_write_policies_count\s*<>\s*3/);
+  assert.match(storageMig, /relrowsecurity/);
 });
+
+test('GET /api/books/:id/content, POST /api/books/:id/read-url, and GET /api/admin/books/:id/download enforce valid unexpired due_at, reject null/invalid/expired due_at, stream EPUB/PDF, and allow Admin original download', async () => {
+  const { buildValidSampleEpubBuffer } = await import('../utils/epubUtils.test');
+  const { inspectAndValidateEpubArchive } = await import('../utils/epubUtils');
+
+  const EPUB_BOOK_ID = '55555555-5555-4555-8555-555555555555';
+  const CORRUPT_EPUB_BOOK_ID = '66666666-6666-4666-8666-666666666666';
+
+  const validEpubBytes = await buildValidSampleEpubBuffer({
+    title: 'Nusantara EPUB',
+    creator: 'Penulis Nusantara',
+  });
+
+  const futureDue = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+
+  const mock = createMockSupabaseAdmin();
+  mock.books.push(
+    {
+      id: EPUB_BOOK_ID,
+      title: 'Nusantara EPUB',
+      author: 'Penulis Nusantara',
+      publisher: 'Pustaka',
+      publication_year: 2026,
+      cover_path: null,
+      file_path: 'documents/nusantara.epub',
+      file_type: 'epub',
+      total_copies: 3,
+      available_copies: 2,
+      is_published: true,
+      is_archived: false,
+      created_by: ADMIN_ID,
+    },
+    {
+      id: CORRUPT_EPUB_BOOK_ID,
+      title: 'EPUB Rusak',
+      author: 'Anonim',
+      publisher: 'Pustaka',
+      publication_year: 2026,
+      cover_path: null,
+      file_path: 'documents/corrupt.epub',
+      file_type: 'epub',
+      total_copies: 2,
+      available_copies: 1,
+      is_published: true,
+      is_archived: false,
+      created_by: ADMIN_ID,
+    }
+  );
+
+  mock.storageFiles['documents/nusantara.epub'] = Buffer.from(validEpubBytes);
+  mock.storageFiles['documents/corrupt.epub'] = Buffer.from('<html>error not a zip</html>');
+
+  // Set valid future due_at for visitor active loans
+  mock.loans[0].due_at = futureDue; // approved PDF loan
+  mock.loans[1].due_at = futureDue; // borrowed PDF loan
+  mock.loans.push(
+    {
+      id: '77777777-7777-4777-8777-777777777771',
+      user_id: VISITOR_NO_LOANS_ID,
+      book_id: EPUB_BOOK_ID,
+      status: 'approved',
+      requested_at: '2026-11-20T00:00:00.000Z',
+      approved_at: '2026-11-20T01:00:00.000Z',
+      due_at: futureDue,
+      returned_at: null,
+      admin_note: null,
+      created_at: '2026-11-20T00:00:00.000Z',
+      updated_at: '2026-11-20T01:00:00.000Z',
+    },
+    {
+      id: '77777777-7777-4777-8777-777777777772',
+      user_id: VISITOR_NO_LOANS_ID,
+      book_id: CORRUPT_EPUB_BOOK_ID,
+      status: 'borrowed',
+      requested_at: '2026-11-20T00:00:00.000Z',
+      approved_at: '2026-11-20T01:00:00.000Z',
+      due_at: futureDue,
+      returned_at: null,
+      admin_note: null,
+      created_at: '2026-11-20T00:00:00.000Z',
+      updated_at: '2026-11-20T01:00:00.000Z',
+    }
+  );
+
+  await withServer(mock, async (baseUrl) => {
+    // 1. Visitor streams valid EPUB with application/epub+zip + inline + private no-store
+    const epubRes = await fetch(`${baseUrl}/api/books/${EPUB_BOOK_ID}/content`, {
+      headers: { Authorization: 'Bearer visitor-token' },
+    });
+    assert.equal(epubRes.status, 200);
+    assert.equal(epubRes.headers.get('content-type'), 'application/epub+zip');
+    assert.equal(epubRes.headers.get('content-disposition'), 'inline');
+    assert.match(epubRes.headers.get('cache-control') || '', /no-store/);
+    const streamedBytes = new Uint8Array(await epubRes.arrayBuffer());
+    const inspected = await inspectAndValidateEpubArchive(streamedBytes);
+    assert.equal(inspected.valid, true);
+    assert.equal(inspected.title, 'Nusantara EPUB');
+
+    // 2. Visitor streams valid PDF (PDF.js internal reader path remains intact)
+    const pdfRes = await fetch(`${baseUrl}/api/books/${BOOK_MAIN_ID}/content`, {
+      headers: { Authorization: 'Bearer visitor-token' },
+    });
+    assert.equal(pdfRes.status, 200);
+    assert.equal(pdfRes.headers.get('content-type'), 'application/pdf');
+    assert.equal(pdfRes.headers.get('content-disposition'), 'inline');
+    const pdfText = new TextDecoder().decode(await pdfRes.arrayBuffer());
+    assert.ok(pdfText.startsWith('%PDF-'));
+
+    // 3. Corrupted EPUB returns 422 INVALID_EPUB_FILE with clear Indonesian error
+    const corruptRes = await fetch(`${baseUrl}/api/books/${CORRUPT_EPUB_BOOK_ID}/content`, {
+      headers: { Authorization: 'Bearer visitor-token' },
+    });
+    assert.equal(corruptRes.status, 422);
+    const corruptBody = await corruptRes.json();
+    assert.equal(corruptBody.code, 'INVALID_EPUB_FILE');
+    assert.match(corruptBody.error, /rusak|tidak valid/i);
+
+    // 4. Unauthenticated request is rejected (401)
+    const unauthRes = await fetch(`${baseUrl}/api/books/${EPUB_BOOK_ID}/content`);
+    assert.equal(unauthRes.status, 401);
+
+    // 4b. Another authenticated visitor (identity mismatch) cannot read using someone else's approved loan
+    const wrongUserRes = await fetch(`${baseUrl}/api/books/${EPUB_BOOK_ID}/content`, {
+      headers: { Authorization: 'Bearer other-visitor-token' },
+    });
+    assert.equal(wrongUserRes.status, 403);
+    assert.equal((await wrongUserRes.json()).code, 'FORBIDDEN');
+
+    // 5. Reject empty/null, whitespace, invalid, and expired due_at for both /read-url & /content
+    const epubLoanIdx = mock.loans.findIndex((l) => l.book_id === EPUB_BOOK_ID);
+
+    mock.loans[epubLoanIdx].due_at = null;
+    const nullDueReadRes = await fetch(`${baseUrl}/api/books/${EPUB_BOOK_ID}/read-url`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer visitor-token' },
+    });
+    assert.equal(nullDueReadRes.status, 403);
+    assert.equal((await nullDueReadRes.json()).code, 'LOAN_DUE_DATE_REQUIRED');
+
+    const nullDueContentRes = await fetch(`${baseUrl}/api/books/${EPUB_BOOK_ID}/content`, {
+      headers: { Authorization: 'Bearer visitor-token' },
+    });
+    assert.equal(nullDueContentRes.status, 403);
+    assert.equal((await nullDueContentRes.json()).code, 'LOAN_DUE_DATE_REQUIRED');
+
+    mock.loans[epubLoanIdx].due_at = '   ';
+    const emptyDueRes = await fetch(`${baseUrl}/api/books/${EPUB_BOOK_ID}/content`, {
+      headers: { Authorization: 'Bearer visitor-token' },
+    });
+    assert.equal(emptyDueRes.status, 403);
+    assert.equal((await emptyDueRes.json()).code, 'LOAN_DUE_DATE_REQUIRED');
+
+    mock.loans[epubLoanIdx].due_at = 'tanggal-ngawur';
+    const invalidDueReadRes = await fetch(`${baseUrl}/api/books/${EPUB_BOOK_ID}/read-url`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer visitor-token' },
+    });
+    assert.equal(invalidDueReadRes.status, 403);
+    assert.equal((await invalidDueReadRes.json()).code, 'LOAN_DUE_DATE_INVALID');
+
+    const invalidDueContentRes = await fetch(`${baseUrl}/api/books/${EPUB_BOOK_ID}/content`, {
+      headers: { Authorization: 'Bearer visitor-token' },
+    });
+    assert.equal(invalidDueContentRes.status, 403);
+    assert.equal((await invalidDueContentRes.json()).code, 'LOAN_DUE_DATE_INVALID');
+
+    mock.loans[epubLoanIdx].due_at = '2020-01-01T00:00:00.000Z';
+    const expiredContentRes = await fetch(`${baseUrl}/api/books/${EPUB_BOOK_ID}/content`, {
+      headers: { Authorization: 'Bearer visitor-token' },
+    });
+    assert.equal(expiredContentRes.status, 403);
+    assert.equal((await expiredContentRes.json()).code, 'LOAN_EXPIRED');
+
+    // 6. Visitor with returned, pending, or rejected loan is rejected (403 FORBIDDEN)
+    mock.loans[epubLoanIdx].due_at = futureDue;
+    for (const blockedStatus of ['returned', 'pending', 'rejected'] as const) {
+      mock.loans[epubLoanIdx].status = blockedStatus;
+      const blockedRes = await fetch(`${baseUrl}/api/books/${EPUB_BOOK_ID}/content`, {
+        headers: { Authorization: 'Bearer visitor-token' },
+      });
+      assert.equal(blockedRes.status, 403);
+      assert.equal((await blockedRes.json()).code, 'FORBIDDEN');
+    }
+
+    // 7. Visitor cannot use Admin original file download endpoint (403)
+    const visitorDownloadRes = await fetch(`${baseUrl}/api/admin/books/${EPUB_BOOK_ID}/download`, {
+      headers: { Authorization: 'Bearer visitor-token' },
+    });
+    assert.equal(visitorDownloadRes.status, 403);
+
+    // 8. Admin CAN stream EPUB/PDF for inspection AND download original EPUB & PDF as attachment
+    const adminStreamRes = await fetch(`${baseUrl}/api/books/${EPUB_BOOK_ID}/content`, {
+      headers: { Authorization: 'Bearer admin-token' },
+    });
+    assert.equal(adminStreamRes.status, 200);
+
+    const adminDownloadEpubRes = await fetch(`${baseUrl}/api/admin/books/${EPUB_BOOK_ID}/download`, {
+      headers: { Authorization: 'Bearer admin-token' },
+    });
+    assert.equal(adminDownloadEpubRes.status, 200);
+    assert.equal(adminDownloadEpubRes.headers.get('content-type'), 'application/epub+zip');
+    assert.match(
+      adminDownloadEpubRes.headers.get('content-disposition') || '',
+      /^attachment; filename="nusantara-epub\.epub"$/
+    );
+    const adminDownloadedBytes = new Uint8Array(await adminDownloadEpubRes.arrayBuffer());
+    assert.equal(adminDownloadedBytes.length, validEpubBytes.length);
+
+    const adminDownloadPdfRes = await fetch(`${baseUrl}/api/admin/books/${BOOK_MAIN_ID}/download`, {
+      headers: { Authorization: 'Bearer admin-token' },
+    });
+    assert.equal(adminDownloadPdfRes.status, 200);
+    assert.equal(adminDownloadPdfRes.headers.get('content-type'), 'application/pdf');
+    assert.match(
+      adminDownloadPdfRes.headers.get('content-disposition') || '',
+      /^attachment; filename="arsitektur-web-modern\.pdf"$/
+    );
+  });
+});
+
+
+
